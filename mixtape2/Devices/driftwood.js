@@ -23,6 +23,7 @@
 (()=>{const M2=window.M2;
 const W=760,H=400;
 const DIR='Instruments/FreePats Electric Guitar Direct/samples/bridge';
+const LOW=36,HIGH=86;   /* the guitar plays C2 to D6 and nothing outside */
 const clamp=(v,a,b)=>Math.min(b,Math.max(a,v)),pct=v=>Math.round(v*100)+'%',dB=d=>Math.pow(10,d/20);
 const hold=(p,t)=>{if(p.cancelAndHoldAtTime)p.cancelAndHoldAtTime(t);else p.cancelScheduledValues(t);};
 /* a swell's S-shaped rise from `a` to `b` over `dur`, made of eight straight ramps (a value curve cannot be cut cleanly when a note is
@@ -53,7 +54,7 @@ const AMPS={clean:{name:'CLEAN',lo:.6,hi:5,bias:.05,hp:60,col:[[450,-3,.7],[3200
 
 /* the sound as it starts, and the presets on top of it */
 const V0={g:{pick:'BRIDGE',vol:.8,tone:.85,mute:0,strum:'OFF',spread:.45,play:'RING'},pad:{on:false,ch:'warm',level:.45,swell:.5},
-  swell:{on:false,att:.6,mode:'each',sens:1,mix:0,dec:1,wheel:false},comp:{on:false,sus:.4,lvl:.5},drive:{on:false,drive:.35,tone:.55,lvl:.5},
+  swell:{on:false,att:.6,mode:'each',sens:1,mix:0,dec:1,wheel:false},comp:{on:false,sus:.4,lvl:.5,tone:.5,blend:1,att:.3},drive:{on:false,drive:.35,tone:.55,lvl:.5},
   harm:{on:false,mode:'DIATONIC',key:0,iv:'3RD UP',mix:.6},mod:{on:false,mode:'CHORUS',rate:.35,depth:.4},
   amp:{model:'clean',gain:.35,bass:.5,mid:.5,treb:.55,master:.6,cab:true},
   delay:{on:false,div:'1/8 ·',time:.5,fb:.35,mix:.3},verb:{on:true,size:.35,mix:.22,shim:0}};
@@ -160,7 +161,11 @@ function Engine(ctx,outG){
   const chainIn=G(1);gVol.connect(chainIn);
   const sndIn=G(1);sndIn.connect(chainIn);const inMon=ctx.createAnalyser();inMon.fftSize=256;sndIn.connect(inMon);const ibuf=new Float32Array(256);
   /* COMP */
-  const cp=ctx.createDynamicsCompressor(),cpG=G(1);cp.knee.value=8;cp.attack.value=.004;cp.release.value=.25;cp.connect(cpG);const COMP={inp:cp,out:cpG};
+  /* COMP, the AIR COMPRESSOR: SUSTAIN (how hard it squeezes), ATTACK (how long it waits before it clamps, 1 to 60 ms: slow lets the pick
+     snap through), TONE (a treble shelf on what it squeezes), BLEND (the squeezed sound against the clean one: parallel compression, the
+     pick's own attack kept), LEVEL */
+  const cIn=G(1),cp=ctx.createDynamicsCompressor(),cTone=B('highshelf',2500,null,0),cWet=G(1),cDry=G(0),cpG=G(1);cp.knee.value=8;cp.attack.value=.004;cp.release.value=.25;
+  cIn.connect(cp);cp.connect(cTone);cTone.connect(cWet);cWet.connect(cpG);cIn.connect(cDry);cDry.connect(cpG);const COMP={inp:cIn,out:cpG};
   /* DRIVE: a mid hump into a soft clipper, then its TONE */
   const drHp=B('highpass',140,.7),drMid=B('peaking',720,.7,6),drPre=G(1),drSh=ctx.createWaveShaper(),drLp=B('lowpass',4000,.6),drOut=G(1);
   drSh.curve=clipCurve(.05);drSh.oversample='4x';drHp.connect(drMid);drMid.connect(drPre);drPre.connect(drSh);drSh.connect(drLp);drLp.connect(drOut);const DRIVE={inp:drHp,out:drOut};
@@ -208,7 +213,8 @@ function Engine(ctx,outG){
   E.apply=(clock)=>{const P=E.P;if(!P)return;const g=P.g;
     const pk={NECK:[4,-6,3800],MIDDLE:[1.5,-2.5,7000],BRIDGE:[0,0,20000]}[g.pick]||[0,0,20000];   /* neck: rounder and darker; middle: between */
     ramp(pkLo.gain,pk[0]);ramp(pkHi.gain,pk[1]);ramp(tone.frequency,Math.min(toneOf(g.tone),pk[2],g.mute>.02?9000-6500*g.mute:20000));ramp(gVol.gain,g.vol*1.1);
-    const c=P.comp;cp.threshold.value=-8-34*c.sus;cp.ratio.value=3+9*c.sus;ramp(cpG.gain,dB((8+34*c.sus)*(1-1/(3+9*c.sus))*.45+(c.lvl-.5)*16));
+    const c=P.comp,bl=c.blend==null?1:c.blend;cp.threshold.value=-8-34*c.sus;cp.ratio.value=3+9*c.sus;cp.attack.value=.001*Math.pow(60,c.att==null?.3:c.att);ramp(cTone.gain,((c.tone==null?.5:c.tone)-.5)*18);
+    ramp(cWet.gain,Math.sin(bl*Math.PI/2)*dB((8+34*c.sus)*(1-1/(3+9*c.sus))*.45));ramp(cDry.gain,Math.cos(bl*Math.PI/2));ramp(cpG.gain,dB((c.lvl-.5)*16));
     const d=P.drive,dg=1+60*d.drive*d.drive;ramp(drPre.gain,dg/8);ramp(drLp.frequency,1500*Math.pow(6,d.tone));ramp(drOut.gain,.5/Math.tanh(dg*.5)*(.25+1.5*d.lvl));
     const m=P.mod,rate=rateOf(m.rate);
     if(m.on&&!lfo){lfo=ctx.createOscillator();lfo.type='sine';lfo.connect(mDep);lfo.connect(mTrD);lfo.start();}
@@ -242,9 +248,9 @@ function Engine(ctx,outG){
     rewire();};
 
   /* a note: its own copy (or the nearest recording, sped), coming in at once or swelling, muted or ringing, panned if a harmony */
-  /* (a note above the guitar's top, D6, folds down an octave or two, as a cello's section does: nothing is stretched past what the
-     recordings reach; it still lets go with its own key) */
-  E.play=(n,vel,o)=>{o=o||{};const n0=n;while(n>86)n-=12;const P=E.P,t=Math.max(ctx.currentTime,o.when||0),lay=vel<=92?'soft':'hard';E.rr=(E.rr||0)+1;
+  /* (the guitar's range, C2 to D6, the lowest recording to a 22-fret guitar's top: a note outside it is not played at all, Steve's
+     choice, nothing folded or stretched; a HARMONY note that would fall outside is left out too) */
+  E.play=(n,vel,o)=>{o=o||{};if(n<LOW||n>HIGH)return null;const n0=n,P=E.P,t=Math.max(ctx.currentTime,o.when||0),lay=vel<=92?'soft':'hard';E.rr=(E.rr||0)+1;
     let kb;if(o.rev){const b=revBuf(ctx,n,lay);kb=b&&{b,rate:1};}else kb=keyBuf(ctx,n,lay,1+E.rr%(n>=66?4:2));if(!kb)return null;
     const src=ctx.createBufferSource();src.buffer=kb.b;src.playbackRate.value=kb.rate*(E.bend?Math.pow(2,E.bend*2/12):1);
     /* soft picking where only hard picks were recorded (above E4): darker (a lowpass, lower the softer), a touch quieter and gentler
@@ -274,6 +280,7 @@ function Engine(ctx,outG){
   E.rise=t=>{const S=E.P.swell,w=E.wetT||0;curveTo(rWet.gain,w*S.mix,w,t,Math.max(.3,swellOf(S.att)*1.5));};
   /* the mod wheel as a volume pedal (WHEEL lit): its square, so the bottom of its travel is gentle */
   E.wheel=v=>{E.wheelV=v*v;const S=E.P.swell;if(S.on&&S.wheel)ramp(whG.gain,E.wheelV,.03);};
+  E.compGR=()=>E.awake&&E.P&&E.P.comp.on?-cp.reduction:0;   /* (how hard the AIR COMPRESSOR squeezes now, dB: its gauge) */
   E.swState=()=>({sw:+swG.gain.value.toFixed(3),wheel:+whG.gain.value.toFixed(3),wet:+rWet.gain.value.toFixed(3),tide:!!tide});
   E.noteOff=(n,t)=>{t=t==null?ctx.currentTime:t;const rel=E.relTime();for(const v of E.voices)if(v.parent===n&&!v.released&&!v.oneShot)E.release(v,t,v.harm?rel*1.2:rel);};
   E.allOff=()=>{for(const v of [...E.voices])E.kill(v,.03);};
@@ -285,7 +292,7 @@ function Engine(ctx,outG){
   E.sndIn=sndIn;E.lfoOn=()=>!!lfo;E.shimOn=()=>!!shim;E.chain=()=>chainKey;
   E.dispose=()=>{E.allOff();if(lfo)try{lfo.stop();}catch(e){}if(shim)shim.stop();clearTimeout(irT);
     if(tide)try{tide.stop();}catch(e){}
-    setTimeout(()=>{for(const n of [swG,whG,tideAmp,loopIn,padBus,vBus,pkLo,pkHi,tone,gVol,chainIn,sndIn,cp,cpG,drHp,drMid,drPre,drSh,drLp,drOut,mIn,mDry,mDl,mWet,mSum,mTr,mDep,mTrD,aHp,aPre,aSh,aMk,aBass,aMid,aTreb,aC1,aC2,cab1,cab2,cab3,cab4,cabOut,aMaster,dIn,dDry,dL,dR,dFb,dTone,dMg,dWet,dOut,rIn,rDry,rPre,rCv,rWet,rOut,rShG,preLim,lim])try{n.disconnect();}catch(e){}},300);};
+    setTimeout(()=>{for(const n of [swG,whG,tideAmp,loopIn,padBus,vBus,pkLo,pkHi,tone,gVol,chainIn,sndIn,cIn,cp,cTone,cWet,cDry,cpG,drHp,drMid,drPre,drSh,drLp,drOut,mIn,mDry,mDl,mWet,mSum,mTr,mDep,mTrD,aHp,aPre,aSh,aMk,aBass,aMid,aTreb,aC1,aC2,cab1,cab2,cab3,cab4,cabOut,aMaster,dIn,dDry,dL,dR,dFb,dTone,dMg,dWet,dOut,rIn,rDry,rPre,rCv,rWet,rOut,rShG,preLim,lim])try{n.disconnect();}catch(e){}},300);};
   return E;}
 
 /* ---- the face (a plain prototype: GUITAR and AMP on top, the PEDALBOARD below) ---- */
@@ -368,6 +375,11 @@ function style(){if(styled)return;styled=true;const s=document.createElement('st
 .dw .gt .sw em{font-style:normal;font-size:6.5px;color:#D8BFA2;margin-right:2px}
 .dw .gt .kns{position:absolute;display:flex;gap:4px}
 .dw .ped.swell{flex:0 0 111px;padding:0;background:#0E3B44;border-radius:4px;overflow:hidden}
+.dw .ped.comp.air{flex:0 0 73px;padding:0;background:#E9B312;border-radius:4px;overflow:hidden;box-shadow:inset 0 1px 0 rgba(255,255,255,.35),0 2px 4px #000}
+.dw .acf{position:absolute;left:0;top:0;transform-origin:0 0;transform:scale(.11423)}.dw .ack,.dw .acfs,.dw .acpatch,.dw .acneedle,.dw .acled{position:absolute}
+.dw .ack{border-radius:50%;cursor:ns-resize}.dw .acfs{border-radius:50%;cursor:pointer}.dw .acfs.down{background:rgba(0,0,0,.25)}
+.dw .acpatch,.dw .acneedle{pointer-events:none}.dw .acn{transition:none}.dw .acled{border-radius:50%;pointer-events:none}
+.dw .ped.air.on .acled{background:radial-gradient(circle,#FFE8E0 0 22%,#FF3A24 55%,rgba(255,40,20,0) 100%);box-shadow:0 0 30px 12px rgba(255,50,30,.6)}
 .dw .osf{position:absolute;left:0;top:0;transform-origin:0 0;transform:scale(.12398)}.dw .osb,.dw .osk,.dw .osfs,.dw .osw{position:absolute;cursor:pointer}
 .dw .osb{border-radius:10px}.dw .osb.down,.dw .osfs.down{background:rgba(0,0,0,.25)}.dw .osb.on{box-shadow:inset 0 0 40px rgba(120,255,220,.3)}
 .dw .osl{position:absolute;width:22px;height:22px;border-radius:50%;pointer-events:none}
@@ -382,7 +394,7 @@ function style(){if(styled)return;styled=true;const s=document.createElement('st
 /* the knobs: their place in the settings, name, how their value reads, where a double-click puts them */
 const KN={'g.playk':['PLAY',v=>{const m=PLAYS[Math.round(v*3)];return m+' · '+PLAYTIP[m];}],'g.vol':['VOLUME',pct],'g.tone':['TONE',v=>v>.98?'OPEN':Math.round(toneOf(v))+' HZ'],'g.mute':['MUTE',v=>v<.02?'OFF (RINGING)':pct(v)],'g.spread':['SPREAD',v=>Math.round(spreadOf(v)*1000)+' MS A STRING'],
   'swell.att':['FADE IN',v=>{const s=swellOf(v);return (s<1?Math.round(s*1000)+' MS':s.toFixed(2)+' S')+' · TIDE: A WAVE EVERY '+tideBeats(v)+' BEATS';}],'swell.sens':['SENS',v=>v>.98?'EVERY NOTE SWELLS':'NOTES SOFTER THAN '+Math.round(thrOf(v))+' SWELL, HARDER ONES PICK'],
-  'swell.mix':['MIX',v=>v<.02?'PURE SWELL':pct(v)+' OF THE PICK KEPT'],'swell.dec':['DECAY',v=>v>.98?'RINGS ON':'FADES IN '+decTc(v).toFixed(2)+' S'],'comp.sus':['SUSTAIN',pct],'comp.lvl':['LEVEL',v=>((v-.5)*16>=0?'+':'')+((v-.5)*16).toFixed(1)+' DB'],
+  'swell.mix':['MIX',v=>v<.02?'PURE SWELL':pct(v)+' OF THE PICK KEPT'],'swell.dec':['DECAY',v=>v>.98?'RINGS ON':'FADES IN '+decTc(v).toFixed(2)+' S'],'comp.sus':['SUSTAIN',pct],'comp.tone':['TONE',v=>((v-.5)*18>=0?'+':'')+((v-.5)*18).toFixed(1)+' DB TREBLE'],'comp.blend':['BLEND',v=>v>.98?'ALL SQUEEZED':v<.02?'ALL CLEAN':pct(v)+' SQUEEZED'],'comp.att':['ATTACK',v=>(.001*Math.pow(60,v)*1000).toFixed(1)+' MS'],'comp.lvl':['LEVEL',v=>((v-.5)*16>=0?'+':'')+((v-.5)*16).toFixed(1)+' DB'],
   'drive.drive':['DRIVE',pct],'drive.tone':['TONE',pct],'drive.lvl':['LEVEL',pct],'harm.mix':['MIX',pct],'mod.rate':['RATE',v=>rateOf(v).toFixed(2)+' HZ'],'mod.depth':['DEPTH',pct],
   'g.strumk':['STRUM',v=>({OFF:'OFF: EVERY KEY AT ONCE',DOWN:'DOWN: EACH CHORD LOW TO HIGH','DOWN/UP':'DOWN/UP: DOWN, THEN THE NEXT CHORD UP'})[STRUMS[Math.round(v*2)]]],
   'amp.chan':['CHANNEL',v=>(AMPS[Object.keys(AMPS)[Math.round(v*3)]]||AMPS.clean).name],'amp.gain':['GAIN',pct],'amp.bass':['BASS',v=>((v-.5)*20).toFixed(1)+' DB'],'amp.mid':['MIDDLE',v=>((v-.5)*20).toFixed(1)+' DB'],'amp.treb':['TREBLE',v=>((v-.5)*20).toFixed(1)+' DB'],'amp.master':['MASTER',pct],
@@ -505,9 +517,28 @@ function phLayer(P){const u=M2.fileUrl(P.src),[cx,cy,cw,ch]=P.cut,bg=(x,y)=>`bac
     (P.labels||[]).map(([t,x,y])=>`<span class="phl" style="left:${x-cx}px;top:${y-cy}px">${t}</span>`).join('')+
     (P.toggle?`<i class="tgl" style="${at(P.toggle[0]-16,P.toggle[1]-16,32,32)}"></i>`:'')+
     (P.jewel?`<i class="jewel" style="${at(P.jewel[0]-P.jewel[2],P.jewel[1]-P.jewel[2],2*P.jewel[2],2*P.jewel[2])}"></i>`:'')+'</div></div>';}
-const PEDALS=[['swell','OCEAN SWELL','notes rise like a swell on the sea: each note, a wave, the tide, or the hall rising'],['comp','COMP','evens and lengthens'],['drive','DRIVE','a warm overdrive'],['harm','HARMONY','harmonies in the key'],['mod','MOD','chorus · vibrato · tremolo'],['pad','PAD','HALO\'s pad under the guitar, on the keys you hold'],
+/* the AIR COMPRESSOR's face: Steve's photo (Skins\air-compressor.jpg, 848 × 1262, made 2026-11-24 from the sketch Skins\air-compressor-
+   sketch.png: a yellow pedal with a printed shop air compressor), framed on its own yellow body as OCEAN SWELL is (rounded, just inside the edges: the cut-out along its outline left a ragged fringe)
+   (cut: x, y, w, h; 122 / 1068). Its knobs' black tops turn (their skirts, seen a little from the side, stay); the big pressure gauge
+   on the printed compressor works: its printed needle is painted out with the dial's own cream (made from the photo's bytes as it
+   loads) and a live needle drawn in its place reads how hard the pedal squeezes (the compressor's gain reduction, 0 to 30 dB over the
+   dial's sweep, the red zone from about 21 dB), swinging up quickly and settling back slowly, with a little spring, as a real gauge */
+const AC={src:'mixtape2/Skins/air-compressor.jpg',iw:848,ih:1262,cut:[106,100,640,1068],   /* (the yellow body only, just inside its edges: no jacks, no backdrop) */
+  knobs:[['comp.lvl',222,236],['comp.tone',420,236],['comp.sus',615,236],['comp.blend',271,466],['comp.att',566,466]],kr:50,
+  gauge:{x:583,y:694.7,r:30,zero:-131,full:131,ptr:29,tail:13},fs:[424,1102,60],led:[653,1100,12]};
+function acFace(){const u=M2.fileUrl(AC.src),[cx,cy,cw,ch]=AC.cut,bg=(x,y)=>`background:url('${u}') ${-x}px ${-y}px/${AC.iw}px ${AC.ih}px no-repeat`,
+    at=(x,y,w,h)=>`left:${x-cx}px;top:${y-cy}px;width:${w}px;height:${h}px`,G=AC.gauge,gr=G.r+8;
+  return `<div class="acf" style="width:${cw}px;height:${ch}px;${bg(cx,cy)}">`+
+    AC.knobs.map(([k,x,y])=>{const r=AC.kr;return `<div class="ack" data-k="${k}" title="${KN[k][0].toLowerCase()}" style="${at(x-r,y-r,2*r,2*r)};${bg(x-r,y-r)}"></div>`;}).join('')+
+    `<canvas class="acpatch" style="${at(G.x-G.r,G.y-G.r,2*G.r,2*G.r)}"></canvas>`+
+    `<svg class="acneedle" viewBox="${-gr} ${-gr} ${2*gr} ${2*gr}" style="${at(G.x-gr,G.y-gr,2*gr,2*gr)}"><g class="acn" style="transform:rotate(${G.zero}deg)">`+
+      `<path d="M-1.6 ${G.tail} L-1.1 0 L-.35 ${-G.ptr} L.35 ${-G.ptr} L1.1 0 L1.6 ${G.tail} Z" fill="#141210"/><circle cx="0" cy="${G.tail-1}" r="2.6" fill="#141210"/></g>`+
+      `<circle r="4.6" fill="#1E1B18"/><circle r="1.8" cx="-.8" cy="-.8" fill="#6A645C"/></svg>`+
+    `<i class="acled" style="${at(AC.led[0]-AC.led[2],AC.led[1]-AC.led[2],2*AC.led[2],2*AC.led[2])}"></i>`+
+    `<div class="acfs" data-s="comp" title="AIR COMPRESSOR on / off" style="${at(AC.fs[0]-AC.fs[2],AC.fs[1]-AC.fs[2],2*AC.fs[2],2*AC.fs[2])}"></div></div>`;}
+const PEDALS=[['swell','OCEAN SWELL','notes rise like a swell on the sea: each note, a wave, the tide, or the hall rising'],['comp','AIR COMPRESSOR','evens and lengthens: squeeze, attack, tone, blend'],['drive','DRIVE','a warm overdrive'],['harm','HARMONY','harmonies in the key'],['mod','MOD','chorus · vibrato · tremolo'],['pad','PAD','HALO\'s pad under the guitar, on the keys you hold'],
   ['delay','DELAY','echoes, in time with the desk'],['verb','REVERB','a hall, shimmer above it']];
-const PNAME={swell:'OCEAN SWELL',comp:'COMP',drive:'DRIVE',harm:'HARMONY',mod:'MOD',pad:'PAD',delay:'DELAY',verb:'REVERB'};
+const PNAME={swell:'OCEAN SWELL',comp:'AIR COMPRESSOR',drive:'DRIVE',harm:'HARMONY',mod:'MOD',pad:'PAD',delay:'DELAY',verb:'REVERB'};
 
 const DEF={id:'driftwood',name:'DRIFTWOOD electric guitar',short:'DRIFTWOOD',type:'instrument',version:'0.1',format:1,w:W,h:H,scale:1.75,   /* (opens at 175%: 1330 × 700 on the laptop's 1536 × 864) */
   blurb:'An electric guitar for writing songs: guitar, pedalboard (swell, comp, drive, harmony, mod), amp and cabinet, delay and reverb',
@@ -545,7 +576,7 @@ const DEF={id:'driftwood',name:'DRIFTWOOD electric guitar',short:'DRIFTWOOD',typ
     <div class="stage" title="" style="background:linear-gradient(rgba(0,0,0,.12),rgba(0,0,0,0) 30%,rgba(0,0,0,.38)),url('${M2.fileUrl('mixtape2/Skins/driftwood-stage.jpg')}') center 30%/cover no-repeat,#1A1410"><canvas class="sea"></canvas><div class="floor"></div><div class="rig">${phLayer(AM)}${phLayer(GT)}</div></div>
     <div class="panel board">
       <div class="ped swell" data-p="swell" title="OCEAN SWELL: notes rise like a swell on the sea">${osFace()}</div>
-      ${ped('comp','COMP',`<div class="row">${knob('comp.sus','sm')}${knob('comp.lvl','sm')}</div>`)}
+      <div class="ped comp air" data-p="comp" title="AIR COMPRESSOR: evens and lengthens; its gauge shows how hard it squeezes">${acFace()}</div>
       ${ped('drive','DRIVE',`<div class="row">${knob('drive.drive','sm')}${knob('drive.tone','sm')}${knob('drive.lvl','sm')}</div>`)}
       ${ped('harm','HARMONY',`<div class="chip" data-c="harm.mode"></div><div class="row"><div class="chip" data-c="harm.key"></div><div class="chip" data-c="harm.iv"></div></div><div class="row">${knob('harm.mix','sm')}</div>`)}
       ${ped('mod','MOD',`<div class="chip" data-c="mod.mode"></div><div class="row">${knob('mod.rate','sm')}${knob('mod.depth','sm')}</div>`)}
@@ -583,6 +614,28 @@ const DEF={id:'driftwood',name:'DRIFTWOOD electric guitar',short:'DRIFTWOOD',typ
         const el=m.querySelector(`.${P.cls} [data-k="${k}"]`);if(!el)continue;el.previousElementSibling.appendChild(cv(base));el.style.background='none';el.appendChild(cv(cap));}
       if(bmp.close)bmp.close();}
     cutKnobs(AM);cutKnobs(GT);
+    /* the AIR COMPRESSOR's gauge: the printed needle (its pointer from the hub to the lower left, its wedge of a counterweight to the
+       upper right) painted out with the dial's own cream, each pixel taken from a light spot of the dial at the same distance from the
+       hub a little round it, so the dial's speckle carries on */
+    (async()=>{const G=AC.gauge;let bmp;try{const f=host.files||window.mixtapeFiles,u=await f.read(AC.src);bmp=await createImageBitmap(new Blob([u]));}catch(e){console.warn('DRIFTWOOD gauge',e);return;}
+      if(dead)return;const R=G.r,n=2*R,cv=$('.acpatch');cv.width=cv.height=n;const g=cv.getContext('2d');g.drawImage(bmp,G.x-R,G.y-R,n,n,0,0,n,n);if(bmp.close)bmp.close();
+      const im=g.getImageData(0,0,n,n),d=im.data,src=new Uint8ClampedArray(d),seg=(px,py,ax,ay,bx,by)=>{const vx=bx-ax,vy=by-ay,t=clamp(((px-ax)*vx+(py-ay)*vy)/(vx*vx+vy*vy),0,1);return Math.hypot(px-ax-t*vx,py-ay-t*vy);};
+      const P1=[-22.4,19.7],P2=[13.6,-9.9],lum=q=>.3*src[q]+.59*src[q+1]+.11*src[q+2],inNeedle=(x,y)=>seg(x,y,0,0,P1[0]*1.06,P1[1]*1.06)<=4.6||seg(x,y,0,0,P2[0]*1.25,P2[1]*1.25)<=7.6||Math.hypot(x,y)<=7.5;
+      for(let j=0;j<n;j++)for(let i=0;i<n;i++){const x=i+.5-R,y=j+.5-R,q=(j*n+i)*4,r=Math.hypot(x,y);
+        if(r>R||!inNeedle(x,y)||src[q]-src[q+2]>55&&lum(q)>95){d[q+3]=0;continue;}   /* (the red zone's own colour is kept: only the needle's dark goes) */
+        /* the middle (by brightness) of the dial's colours at this distance from the hub, round it (no ticks, no red zone, no needle) */
+        const cand=[];for(let a=20;a<360;a+=10){const c=Math.cos(a*Math.PI/180),s=Math.sin(a*Math.PI/180),sx=x*c-y*s,sy=x*s+y*c,si=Math.round(sx+R-.5),sj=Math.round(sy+R-.5);
+          if(si<0||sj<0||si>=n||sj>=n||inNeedle(sx,sy))continue;const sq=(sj*n+si)*4;if(lum(sq)>140&&src[sq]-src[sq+2]<45)cand.push(sq);}
+        if(cand.length){cand.sort((a,b)=>lum(a)-lum(b));const sq=cand[cand.length>>1];d[q]=src[sq];d[q+1]=src[sq+1];d[q+2]=src[sq+2];d[q+3]=255;}
+        else{d[q]=226;d[q+1]=214;d[q+2]=196;d[q+3]=255;}}
+      g.putImageData(im,0,0);})();
+    /* its live needle: how hard it squeezes (E.compGR, dB) over the dial, 0 at zero to 30 at the sweep's end, bouncing off its stop pins; a spring: up quickly, down
+       slowly, a touch of overshoot. Drawn only while it moves (the compressor on and sounding, in sight); at rest it sits at zero */
+    let gRaf=0,gA=AC.gauge.zero,gV=0;const gEl=$('.acn');
+    function gaugeFrame(){gRaf=0;if(dead)return;const G=AC.gauge,gr=E.compGR(),tgt=G.zero+(G.full-G.zero)*clamp(gr/30,0,1);
+      gV+=(tgt-gA)*(tgt>gA?.22:.06);gV*=.62;gA+=gV;if(gA>G.full+3){gA=G.full+3;gV=-gV*.3;}if(gA<G.zero-2){gA=G.zero-2;gV=-gV*.3;}gEl.style.transform=`rotate(${gA.toFixed(2)}deg)`;
+      if(Math.abs(tgt-gA)>.05||Math.abs(gV)>.05||(E.awake&&S.v.comp.on&&inSight))gRaf=requestAnimationFrame(gaugeFrame);}
+    const gaugeGo=()=>{if(!gRaf&&!dead)gRaf=requestAnimationFrame(gaugeFrame);};
     /* the sea (seaGL): a first picture once it is made (the photo behind it until then), then about 30 a second while DRIFTWOOD sounds
        and is in sight; its swells come in faster and bigger the louder it plays (seaLv: quick up, slow down); asleep, the last picture stays */
     let sea=null,seaRaf=0,seaT=0,seaLv=0,seaLast=0,seaFrames=0,inSight=true;const seaCv=$('.sea');
@@ -620,7 +673,7 @@ const DEF={id:'driftwood',name:'DRIFTWOOD electric guitar',short:'DRIFTWOOD',typ
         if(quietSince&&performance.now()-quietSince>5000){E.sleep();if(padE)padE.sleep();quietSince=0;host.engine.busy(uid,false);}}
       else if(plugged('in')&&E.inLevel()>1e-4)awake();
       sleepT=setTimeout(watch,E.awake?400:plugged('in')?150:1000);}
-    const awake=()=>{const was=E.awake;E.wake();m.classList.add('awake');if(!was){quietSince=0;host.engine.busy(uid,true);}seaGo();};
+    const awake=()=>{const was=E.awake;E.wake();m.classList.add('awake');if(!was){quietSince=0;host.engine.busy(uid,true);}seaGo();gaugeGo();};
 
     /* ---- the PAD pedal: HALO's engine (as HORIZON's PAD), made the first time the pedal is switched on, its sound into the amp's
        effects loop (so DELAY and REVERB take it too, its own hall kept small); it plays the keys held, and lets go when they do ---- */
@@ -722,7 +775,7 @@ const DEF={id:'driftwood',name:'DRIFTWOOD electric guitar',short:'DRIFTWOOD',typ
       const tip={'harm.mode':{DIATONIC:'ONE VOICE, IN THE KEY',QUAD:'A 3RD, A 5TH AND AN OCTAVE ABOVE',OCTAVES:'AN OCTAVE BELOW AND ABOVE',CRYSTALS:'BACKWARDS OCTAVES IN ECHOES'}[v.harm.mode],
         'harm.key':NM[v.harm.key]+' MAJOR (OR ITS RELATIVE MINOR: '+NM[(v.harm.key+9)%12]+' MINOR)','harm.iv':'IN '+NM[v.harm.key]+' MAJOR','mod.mode':'','delay.div':v.delay.div==='FREE'?'TIME BY ITS KNOB':'IN TIME WITH THE DESK ('+Math.round(clock.bpm||120)+' BPM)'}[c];
       flash((PNAME[c.split('.')[0]])+' · '+chipText[c](),tip);}
-    function stomp(id){const p=S.v[id];p.on=!p.on;S.edited=true;apply();paint();host.changed('switch');flash(PNAME[id],p.on?'ON':'OFF');}
+    function stomp(id){if(id==='comp')setTimeout(gaugeGo,0);const p=S.v[id];p.on=!p.on;S.edited=true;apply();paint();host.changed('switch');flash(PNAME[id],p.on?'ON':'OFF');}
     function button(b){const v=S.v;
       if(b==='prev'||b==='next')return usePreset(S.preset+(b==='next'?1:-1));
       if(b==='save')return askName();
@@ -771,13 +824,13 @@ const DEF={id:'driftwood',name:'DRIFTWOOD electric guitar',short:'DRIFTWOOD',typ
     return {node:s=>s==='out'?outG:s==='in'?E.sndIn:null,
       receive(sock,msg){if(sock==='keys')key(msg);return true;},
       plugged(sock){if(sock==='keys'){allUp();if(comp&&plugged('keys'))compKeys(false);kinLamp();}if(sock==='in')watch();},
-      visible(v){inSight=v!==false;if(inSight)seaGo();},   /* (out of sight the sea is not drawn) */
+      visible(v){inSight=v!==false;if(inSight){seaGo();gaugeGo();}},   /* (out of sight the sea is not drawn) */
       /* for tools\probes\m2-driftwood.js */
-      probe:()=>({sea:{ready:!!sea,running:!!seaRaf,frames:seaFrames,lv:+seaLv.toFixed(2),t:+seaT.toFixed(1)},samples:SAMP.state,loaded:SAMP.buf.size,notes:{soft:SAMP.by.soft.length,hard:SAMP.by.hard.length},awake:E.awake,voices:E.voices.length,live:E.voices.filter(v=>!v.released).length,
+      probe:()=>({gauge:{angle:+gA.toFixed(1),gr:+E.compGR().toFixed(1),moving:!!gRaf},sea:{ready:!!sea,running:!!seaRaf,frames:seaFrames,lv:+seaLv.toFixed(2),t:+seaT.toFixed(1)},samples:SAMP.state,loaded:SAMP.buf.size,notes:{soft:SAMP.by.soft.length,hard:SAMP.by.hard.length},awake:E.awake,voices:E.voices.length,live:E.voices.filter(v=>!v.released).length,
         harm:E.voices.filter(v=>v.harm).length,rev:E.voices.filter(v=>v.oneShot).length,keyBufs:KEYC.size,queued:RQ.length,level:+E.level().toFixed(4),chain:E.chain(),lfo:E.lfoOn(),shimmer:E.shimOn(),
         preset:names()[S.preset],edited:S.edited,play:mode(),swell:Object.assign({mode:S.v.swell.mode,on:S.v.swell.on},E.swState()),hand,strings:E.voices.filter(v=>!v.released&&!v.harm&&!v.oneShot).map(v=>v.n+'@'+v.str+(v.hammer?'h':'')),pad:padE?{on:S.v.pad.on,ch:S.v.pad.ch,voices:padE.voices.length,held:[...padHeld.keys()],awake:!!padE.awake,level:+padE.level().toFixed(4)}:(S.v.pad.on?'no engine':'off'),pedal,down:[...down],lcd:$('.lcd').textContent,rates:E.voices.map(v=>+v.src.playbackRate.value.toFixed(3)),playing:E.voices.map(v=>v.n+(v.fake?'~':'')),}),
       debugSet:(k,v)=>set(k,v,true),debugSea:()=>{if(sea)sea.draw(...seaSize(),seaT+=.03,seaLv);},debugHush:()=>{clearTimeout(pendT);pend=null;E.allOff();if(padE)padE.voices.slice().forEach(v=>v.kill(ctx.currentTime));padHeld.clear();},debugButton:b=>button(b),debugStomp:s=>stomp(s),debugCycle:(c,d)=>cycle(c,d||1),harmOf,
-      destroy(){dead=true;if(seaRaf)cancelAnimationFrame(seaRaf);if(sea)sea.dispose();clearTimeout(flashT);clearTimeout(sleepT);clearTimeout(pendT);clearTimeout(kinT);if(comp)compKeys(false);if(offMidi)offMidi();offStat();offIn();offTempo();
+      destroy(){dead=true;if(seaRaf)cancelAnimationFrame(seaRaf);if(gRaf)cancelAnimationFrame(gRaf);if(sea)sea.dispose();clearTimeout(flashT);clearTimeout(sleepT);clearTimeout(pendT);clearTimeout(kinT);if(comp)compKeys(false);if(offMidi)offMidi();offStat();offIn();offTempo();
         if(padE)padE.dispose();E.dispose();host.engine.busy(uid,false);setTimeout(()=>{try{outG.disconnect();}catch(e){}},350);}};}};
 M2.define(DEF);
 M2.driftwood={Engine,SAMP,PRESETS,fresh,harmOf,loadSamples,played:(ctx,n,lay,rr)=>{const r=nearest(n,lay,rr);return r&&render(ctx,r,n);}};   /* (played: a note as DRIFTWOOD plays it, for toolsprobesm2-driftwood-tuning.js) */
