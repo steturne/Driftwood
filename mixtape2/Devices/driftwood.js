@@ -79,11 +79,22 @@ const deep=(a,b)=>{for(const k in b)if(b[k]&&typeof b[k]==='object'&&!Array.isAr
 const fresh=p=>deep(JSON.parse(JSON.stringify(V0)),JSON.parse(JSON.stringify(p||{})));
 
 /* ---- the recordings: decoded once for every DRIFTWOOD, mono, each take's level evened (peak 0.7, soft picking 0.45) ---- */
-const SAMP={state:'none',msg:'',p:null,buf:new Map(),by:{soft:[],hard:[]},done:0,total:0};   /* buf: 'note|soft/hard|take' → AudioBuffer */
+const SAMP={state:'none',msg:'',p:null,buf:new Map(),tune:new Map(),by:{soft:[],hard:[]},done:0,total:0};   /* buf: 'note|soft/hard|take' → AudioBuffer;
+   tune: the same → how far off its note it was recorded, in cents (+ sharp), put right whenever it plays */
+/* a recording's pitch, by YIN (the lag where the ringing sound best repeats itself, refined between samples), about its note's f0.
+   The guitar was a real one, a little out: measured 2026-11-24, most takes within ±8 cents but A2's 11 sharp and 15 flat, enough to
+   sound out of tune beside the CELLOS (Steve heard it); so each take is measured as it loads and played at true pitch */
+function yinHz(x,sr,f0){const lo=Math.floor(sr/(f0*1.5)),hi=Math.ceil(sr/(f0/1.5)),N=Math.min(4096,x.length-hi-2);if(N<512)return 0;const d=new Float64Array(hi+2),c=new Float64Array(hi+2);
+  for(let t=1;t<=hi+1;t++){let s=0;for(let i=0;i<N;i++){const e=x[i]-x[i+t];s+=e*e;}d[t]=s;}
+  let run=0,best=lo,m=1e9;for(let t=1;t<=hi+1;t++){run+=d[t];c[t]=d[t]*t/(run||1);}for(let t=lo;t<=hi;t++)if(c[t]<m){m=c[t];best=t;}
+  const a=c[best-1],b=c[best],g=c[best+1],den=a-2*b+g;return sr/(best+(den?(a-g)/(2*den):0));}
 const NAME_RE=/^([A-G])(#?)(\d)_s\d(_soft)?_(\d\d)\.flac$/i,SEMI={C:0,D:2,E:4,F:5,G:7,A:9,B:11};
 function loadSamples(ctx,files){if(SAMP.p)return SAMP.p;SAMP.state='loading';SAMP.msg='TUNING UP…';M2.emit('driftwood-samples');
   SAMP.p=(async()=>{let list=[];try{list=await files.list(DIR);}catch(e){}
-    const want=list.map(f=>{const m=!f.dir&&NAME_RE.exec(f.name);return m&&+m[5]<=2&&{name:f.name,n:12*(+m[3]+1)+SEMI[m[1].toUpperCase()]+(m[2]?1:0),lay:m[4]?'soft':'hard',rr:+m[5]};}).filter(Boolean);
+    /* two takes of each note; up high (G4 and above, where only hard picking was recorded) all four, so repeated high notes vary */
+    const want=list.map(f=>{const m=!f.dir&&NAME_RE.exec(f.name);if(!m)return null;const n=12*(+m[3]+1)+SEMI[m[1].toUpperCase()]+(m[2]?1:0),soft=!!m[4];
+      if(soft&&n>=67)return {name:f.name,n,lay:'hard',rr:4};   /* (D5's one soft take is, in the set's own map, a fourth take of its hard picks) */
+      return (+m[5]<=2||!soft&&n>=67)&&{name:f.name,n,lay:soft?'soft':'hard',rr:+m[5]};}).filter(Boolean);
     if(!want.length){SAMP.state='missing';SAMP.msg='NO GUITAR RECORDINGS';M2.emit('driftwood-samples');SAMP.p=null;throw new Error('missing');}
     want.sort((a,b)=>Math.abs(a.n-55)-Math.abs(b.n-55));SAMP.total=want.length;SAMP.done=0;   /* the middle of the neck first */
     const one=async w=>{try{const u=await files.read(DIR+'/'+w.name),b=await ctx.decodeAudioData(u.buffer.slice(u.byteOffset,u.byteOffset+u.byteLength));
@@ -91,6 +102,8 @@ function loadSamples(ctx,files){if(SAMP.p)return SAMP.p;SAMP.state='loading';SAM
         let s0=0;while(s0<x.length&&Math.abs(x[s0])<pk*.02)s0++;s0=Math.max(0,s0-Math.round(sr*.002));   /* the silence before the pick cut off */
         const maxS=w.n<52?10:w.n<66?8:6,n=Math.min(x.length-s0,Math.round(sr*maxS)),fade=Math.round(sr*.4),o=ctx.createBuffer(1,n,sr),y=o.getChannelData(0),k=(w.lay==='soft'?.45:.7)/(pk||1);
         for(let i=0;i<n;i++)y[i]=x[s0+i]*k;for(let i=0;i<fade&&i<n;i++)y[n-1-i]*=i/fade;
+        const f0=440*Math.pow(2,(w.n-69)/12),hz=yinHz(y.subarray(Math.round(.25*sr),Math.round(.8*sr)),sr,f0),ct=hz?1200*Math.log2(hz/f0):0;
+        SAMP.tune.set(w.n+'|'+w.lay+'|'+w.rr,Math.abs(ct)<45?ct:0);   /* (a reading further off than that is a mistaken one: left alone) */
         SAMP.buf.set(w.n+'|'+w.lay+'|'+w.rr,o);if(!SAMP.by[w.lay].includes(w.n))SAMP.by[w.lay].push(w.n);}catch(e){console.warn('DRIFTWOOD sample',w.name,e);}
       SAMP.done++;if(SAMP.done%6===0){SAMP.msg='TUNING UP… '+Math.round(SAMP.done/SAMP.total*100)+'%';M2.emit('driftwood-samples');}};
     const q=[...want];await Promise.all([0,1,2,3].map(async()=>{while(q.length)await one(q.shift());}));
@@ -98,21 +111,24 @@ function loadSamples(ctx,files){if(SAMP.p)return SAMP.p;SAMP.state='loading';SAM
     SAMP.state=SAMP.buf.size?'ready':'missing';SAMP.msg=SAMP.buf.size?'':'NO GUITAR RECORDINGS';M2.emit('driftwood-samples');})();
   return SAMP.p;}
 /* the nearest recording of a note (that picking, that take; else the other take, else the other picking) */
+/* (that picking only if it was recorded within 2 half steps, the recordings' spacing: soft picks stop at E4, and a soft high note once
+   played the E4 recording sped up an octave, which sounded fake; now it takes the hard pick there, softened in E.play) */
 function nearest(n,lay,rr){for(const L of [lay,lay==='soft'?'hard':'soft']){const ns=SAMP.by[L];if(!ns.length)continue;let s=ns[0];for(const m of ns)if(Math.abs(m-n)<Math.abs(s-n))s=m;
-    for(const r of [rr,rr===1?2:1]){const b=SAMP.buf.get(s+'|'+L+'|'+r);if(b)return{s,b,id:s+'|'+L+'|'+r};}}return null;}
+    if(L===lay&&Math.abs(s-n)>2&&SAMP.by[L==='soft'?'hard':'soft'].some(m=>Math.abs(m-n)<=2))continue;
+    for(const r of [rr,rr===1?2:1,1]){const id=s+'|'+L+'|'+r,b=SAMP.buf.get(id);if(b)return{s,b,id,k:Math.pow(2,-(SAMP.tune.get(id)||0)/1200)};}}return null;}   /* k: its tuning put right */
 /* a note's own copy at its own pitch (made once, kept: the last 200), made a little after the note asks so playing never waits */
 const KEYC=new Map(),RQ=[];let rqT=0;
 const a4=()=>globalThis.MIXTAPE_A4||440;
-function render(ctx,r,n){const src=r.b.getChannelData(0),ratio=Math.pow(2,(n-r.s)/12)*a4()/440,len=Math.floor((src.length-3)/ratio);if(len<64)return null;
+function render(ctx,r,n){const src=r.b.getChannelData(0),ratio=Math.pow(2,(n-r.s)/12)*a4()/440*r.k,len=Math.floor((src.length-3)/ratio);if(len<64)return null;
   const b=ctx.createBuffer(1,len,r.b.sampleRate),o=b.getChannelData(0);
   for(let i=0;i<len;i++){const p=i*ratio,j=p|0,f=p-j,y0=src[j>0?j-1:0],y1=src[j],y2=src[j+1],y3=src[j+2];o[i]=y1+.5*f*(y2-y0+f*(2*y0-5*y1+4*y2-y3+f*(3*(y1-y2)+y3-y0)));}
   return b;}
 function keep(id,b){KEYC.set(id,b);while(KEYC.size>96)KEYC.delete(KEYC.keys().next().value);}   /* (a ringing note is up to 10 s: 96 copies is about 150 MB) */
-function keyBuf(ctx,n,lay,rr){const r=nearest(n,lay,rr);if(!r)return null;const id=n+'|'+r.id+'|'+a4();
-  let b=KEYC.get(id);if(b){KEYC.delete(id);KEYC.set(id,b);return{b,rate:1};}
-  if(n===r.s&&a4()===440)return{b:r.b,rate:1};
+function keyBuf(ctx,n,lay,rr){const r=nearest(n,lay,rr);if(!r)return null;const id=n+'|'+r.id+'|'+a4(),hard=r.id.includes('|hard|');   /* hard: a hard pick, whatever was asked */
+  let b=KEYC.get(id);if(b){KEYC.delete(id);KEYC.set(id,b);return{b,rate:1,hard};}
+  if(n===r.s&&a4()===440&&Math.abs(r.k-1)<3e-4)return{b:r.b,rate:1,hard};   /* (its own note, recorded within half a cent) */
   if(!RQ.some(x=>x.id===id))RQ.push({id,r,n});if(!rqT)rqT=setTimeout(()=>drain(ctx),30);
-  return{b:r.b,rate:Math.pow(2,(n-r.s)/12)*a4()/440};}
+  return{b:r.b,rate:Math.pow(2,(n-r.s)/12)*a4()/440*r.k,hard};}
 function drain(ctx){rqT=0;const t0=performance.now();while(RQ.length&&performance.now()-t0<12){const x=RQ.shift();if(!KEYC.has(x.id)){const b=render(ctx,x.r,x.n);if(b)keep(x.id,b);}}if(RQ.length)rqT=setTimeout(()=>drain(ctx),40);}
 /* CRYSTALS' shard: the first 1.4 s of a note an octave up, backwards (made once a note) */
 function revBuf(ctx,n,lay){const id='R|'+n+'|'+lay+'|'+a4();let b=KEYC.get(id);if(b)return b;const r=nearest(n,lay,1);if(!r)return null;
@@ -226,21 +242,27 @@ function Engine(ctx,outG){
     rewire();};
 
   /* a note: its own copy (or the nearest recording, sped), coming in at once or swelling, muted or ringing, panned if a harmony */
-  E.play=(n,vel,o)=>{o=o||{};const P=E.P,t=Math.max(ctx.currentTime,o.when||0),lay=vel<=92?'soft':'hard';E.rr=(E.rr||0)+1;
-    let kb;if(o.rev){const b=revBuf(ctx,n,lay);kb=b&&{b,rate:1};}else kb=keyBuf(ctx,n,lay,1+E.rr%2);if(!kb)return null;
+  /* (a note above the guitar's top, D6, folds down an octave or two, as a cello's section does: nothing is stretched past what the
+     recordings reach; it still lets go with its own key) */
+  E.play=(n,vel,o)=>{o=o||{};const n0=n;while(n>86)n-=12;const P=E.P,t=Math.max(ctx.currentTime,o.when||0),lay=vel<=92?'soft':'hard';E.rr=(E.rr||0)+1;
+    let kb;if(o.rev){const b=revBuf(ctx,n,lay);kb=b&&{b,rate:1};}else kb=keyBuf(ctx,n,lay,1+E.rr%(n>=66?4:2));if(!kb)return null;
     const src=ctx.createBufferSource();src.buffer=kb.b;src.playbackRate.value=kb.rate*(E.bend?Math.pow(2,E.bend*2/12):1);
-    const g=ctx.createGain(),lvl=Math.pow(clamp(vel,1,127)/127,1.4)*(o.gain==null?1:o.gain)*(o.hammer?.8:1);g.gain.value=0;g.gain.setValueAtTime(0,t);src.connect(g);
+    /* soft picking where only hard picks were recorded (above E4): darker (a lowpass, lower the softer), a touch quieter and gentler
+       at its start, as a lighter pick sounds; its own filter only on those notes */
+    const fake=lay==='soft'&&kb.hard&&!o.rev,vs=clamp(vel/92,0,1);let lp=null;
+    if(fake){lp=ctx.createBiquadFilter();lp.type='lowpass';lp.frequency.value=1400+3800*Math.pow(vs,1.5);lp.Q.value=-3;src.connect(lp);}
+    const g=ctx.createGain(),lvl=Math.pow(clamp(vel,1,127)/127,1.4)*(o.gain==null?1:o.gain)*(o.hammer?.8:1)*(fake?.72:1);g.gain.value=0;g.gain.setValueAtTime(0,t);(lp||src).connect(g);
     let pan=null;if(o.pan){pan=ctx.createStereoPanner();pan.pan.value=o.pan;g.connect(pan);pan.connect(vBus);}else g.connect(vBus);
     /* OCEAN SWELL: SENS picks the notes it swells (played softer than its line); EACH NOTE swells each one from MIX up; WAVE and
        RISE restart the shared swell or the hall's; DECAY lets every note fade after it has swelled (short: like tape backwards) */
-    const S=P.swell,sOn=S.on&&!o.rev,soft=sOn&&vel<=thrOf(S.sens),sw=soft&&S.mode==='each',att=sw?swellOf(S.att):o.hammer?.012:.003;
+    const S=P.swell,sOn=S.on&&!o.rev,soft=sOn&&vel<=thrOf(S.sens),sw=soft&&S.mode==='each',att=sw?swellOf(S.att):o.hammer?.012:fake?.005+.012*(1-vs):.003;
     if(sw){g.gain.linearRampToValueAtTime(lvl*S.mix,t+.003);sCurve(g.gain,lvl*S.mix,lvl,t+.004,att);}
     else g.gain.linearRampToValueAtTime(lvl,t+att);
     if(soft&&!o.harm&&!o.hammer){if(S.mode==='wave')E.wave(t);else if(S.mode==='rise')E.rise(t);}
     const tcs=[];if(P.g.mute>.02&&!o.rev)tcs.push(muteTc(P.g.mute));if(sOn&&S.dec<.98)tcs.push(decTc(S.dec));
     if(tcs.length)g.gain.setTargetAtTime(0,t+(sw?att+.005:att+.01)+(sOn&&S.mode!=='each'&&S.dec<.98?swellOf(S.att)*.6:0),Math.min(...tcs));
-    src.start(t,o.offset||0);const v={n,src,g,pan,t0:t,att,lvl,rate0:kb.rate,str:o.str==null?-1:o.str,hammer:!!o.hammer,harm:!!o.harm,parent:o.parent==null?n:o.parent,oneShot:!!o.rev,strum:o.strum||0,released:false};
-    src.onended=()=>{const i=E.voices.indexOf(v);if(i>=0)E.voices.splice(i,1);try{src.disconnect();g.disconnect();if(pan)pan.disconnect();}catch(e){}};
+    src.start(t,o.offset||0);const v={n,src,g,pan,t0:t,att,lvl,rate0:kb.rate,str:o.str==null?-1:o.str,hammer:!!o.hammer,harm:!!o.harm,parent:o.parent==null?n0:o.parent,oneShot:!!o.rev,strum:o.strum||0,fake,released:false};
+    src.onended=()=>{const i=E.voices.indexOf(v);if(i>=0)E.voices.splice(i,1);try{src.disconnect();g.disconnect();if(pan)pan.disconnect();if(lp)lp.disconnect();}catch(e){}};
     E.voices.push(v);while(E.voices.length>32)E.kill(E.voices[0],.02);return v;};
   E.release=(v,t,rel)=>{if(v.released)return;v.released=true;t=Math.max(t,v.t0+.01);const g=v.g.gain;hold(g,t);g.setTargetAtTime(0,t,rel/4);try{v.src.stop(t+rel+.05);}catch(e){}};
   E.kill=(v,rel)=>{const i=E.voices.indexOf(v);if(i>=0)E.voices.splice(i,1);E.release(v,ctx.currentTime,rel||.02);};
@@ -753,10 +775,10 @@ const DEF={id:'driftwood',name:'DRIFTWOOD electric guitar',short:'DRIFTWOOD',typ
       /* for tools\probes\m2-driftwood.js */
       probe:()=>({sea:{ready:!!sea,running:!!seaRaf,frames:seaFrames,lv:+seaLv.toFixed(2),t:+seaT.toFixed(1)},samples:SAMP.state,loaded:SAMP.buf.size,notes:{soft:SAMP.by.soft.length,hard:SAMP.by.hard.length},awake:E.awake,voices:E.voices.length,live:E.voices.filter(v=>!v.released).length,
         harm:E.voices.filter(v=>v.harm).length,rev:E.voices.filter(v=>v.oneShot).length,keyBufs:KEYC.size,queued:RQ.length,level:+E.level().toFixed(4),chain:E.chain(),lfo:E.lfoOn(),shimmer:E.shimOn(),
-        preset:names()[S.preset],edited:S.edited,play:mode(),swell:Object.assign({mode:S.v.swell.mode,on:S.v.swell.on},E.swState()),hand,strings:E.voices.filter(v=>!v.released&&!v.harm&&!v.oneShot).map(v=>v.n+'@'+v.str+(v.hammer?'h':'')),pad:padE?{on:S.v.pad.on,ch:S.v.pad.ch,voices:padE.voices.length,held:[...padHeld.keys()],awake:!!padE.awake,level:+padE.level().toFixed(4)}:(S.v.pad.on?'no engine':'off'),pedal,down:[...down],lcd:$('.lcd').textContent,rates:E.voices.map(v=>+v.src.playbackRate.value.toFixed(3))}),
+        preset:names()[S.preset],edited:S.edited,play:mode(),swell:Object.assign({mode:S.v.swell.mode,on:S.v.swell.on},E.swState()),hand,strings:E.voices.filter(v=>!v.released&&!v.harm&&!v.oneShot).map(v=>v.n+'@'+v.str+(v.hammer?'h':'')),pad:padE?{on:S.v.pad.on,ch:S.v.pad.ch,voices:padE.voices.length,held:[...padHeld.keys()],awake:!!padE.awake,level:+padE.level().toFixed(4)}:(S.v.pad.on?'no engine':'off'),pedal,down:[...down],lcd:$('.lcd').textContent,rates:E.voices.map(v=>+v.src.playbackRate.value.toFixed(3)),playing:E.voices.map(v=>v.n+(v.fake?'~':'')),}),
       debugSet:(k,v)=>set(k,v,true),debugSea:()=>{if(sea)sea.draw(...seaSize(),seaT+=.03,seaLv);},debugHush:()=>{clearTimeout(pendT);pend=null;E.allOff();if(padE)padE.voices.slice().forEach(v=>v.kill(ctx.currentTime));padHeld.clear();},debugButton:b=>button(b),debugStomp:s=>stomp(s),debugCycle:(c,d)=>cycle(c,d||1),harmOf,
       destroy(){dead=true;if(seaRaf)cancelAnimationFrame(seaRaf);if(sea)sea.dispose();clearTimeout(flashT);clearTimeout(sleepT);clearTimeout(pendT);clearTimeout(kinT);if(comp)compKeys(false);if(offMidi)offMidi();offStat();offIn();offTempo();
         if(padE)padE.dispose();E.dispose();host.engine.busy(uid,false);setTimeout(()=>{try{outG.disconnect();}catch(e){}},350);}};}};
 M2.define(DEF);
-M2.driftwood={Engine,SAMP,PRESETS,fresh,harmOf,loadSamples};
+M2.driftwood={Engine,SAMP,PRESETS,fresh,harmOf,loadSamples,played:(ctx,n,lay,rr)=>{const r=nearest(n,lay,rr);return r&&render(ctx,r,n);}};   /* (played: a note as DRIFTWOOD plays it, for toolsprobesm2-driftwood-tuning.js) */
 })();
