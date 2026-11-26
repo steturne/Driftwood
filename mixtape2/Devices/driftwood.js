@@ -43,7 +43,8 @@ const muteTc=v=>.03+.6*Math.pow(1-v,2);               /* MUTE: how fast a muted 
 const delFree=v=>.06*Math.pow(25,v);                  /* DELAY TIME, free: 60 ms … 1.5 s */
 const sizeOf=v=>.8*Math.pow(10,v);                    /* REVERB SIZE: 0.8 … 8 s */
 const rateOf=v=>.1*Math.pow(80,v);                    /* MOD RATE: 0.1 … 8 Hz */
-const DIVS=[['1/4',1],['1/4 ·',1.5],['1/8 ·',.75],['1/8',.5],['1/16',.25],['FREE',0]];
+const DIVS=[['1/16',.25],['1/8',.5],['1/8 ·',.75],['1/4',1],['1/4 ·',1.5],['1/2',2],['FREE',0]];   /* (THE ROCKIES' SELECT, in its order; 1/2 added: the picture printed 1/4 · twice) */
+const DMODES=['PEAK','VALLEY','SKY'],DMTIP={PEAK:'STRAIGHT BACK AT YOU, DOWN THE MIDDLE',VALLEY:'BOUNCING WALL TO WALL, LEFT AND RIGHT',SKY:'CIRCLING ROUND YOUR HEAD (BEST ON HEADPHONES)'};
 /* BARBERSHOP: its scales (a pentatonic's or the blues' harmonies are found in the 7-note scale it comes from, then moved to its
    nearest own note), a voice's interval in scale steps (3rd = 2 steps), its STYLES each with the pages PREV / NEXT walk through and
    VALUE turns (a page: its key, name, kind: 'iv' an interval, 'c' 0..1, or a list; where it starts), then KEY and SCALE for all */
@@ -98,7 +99,7 @@ const V0={g:{pick:'BRIDGE',vol:.8,tone:.85,mute:0,strum:'OFF',spread:.45,play:'R
   swell:{on:false,att:.6,mode:'each',sens:1,mix:0,dec:1,wheel:false},comp:{on:false,sus:.4,lvl:.5,tone:.5,blend:1,att:.3},drive:{on:false,drive:.35,tone:.55,warm:.5,lvl:.5},
   harm:{on:false,style:'DIATONIC',key:0,auto:false,scale:'MAJOR',mix:.45,lvl:.5,pre:'Thirds above',ed:false,s:{}},mod:{on:false,mode:'CHORUS',rate:.35,depth:.4,mix:.85},
   amp:{model:'clean',gain:.35,bass:.5,mid:.5,treb:.55,master:.6,cab:true},
-  delay:{on:false,div:'1/8 ·',time:.5,fb:.35,mix:.3},verb:{on:true,size:.35,mix:.22,shim:0}};
+  delay:{on:false,div:'1/8 ·',time:.5,fb:.35,mix:.3,tone:.5,mode:'VALLEY',tap:0},verb:{on:true,size:.35,mix:.22,shim:0}};
 const PRESETS=[
   ['Clean writing desk',{comp:{on:true,sus:.3},verb:{on:true,size:.3,mix:.18}}],
   ['Sunday swells',{g:{pick:'NECK',tone:.7},swell:{on:true,att:.62},amp:{treb:.6},delay:{on:true,div:'1/8 ·',fb:.45,mix:.32},verb:{on:true,size:.85,mix:.45,shim:.35}}],
@@ -249,9 +250,22 @@ function Engine(ctx,outG){
   for(const [a,b] of [[aHp,aPre],[aPre,aSh],[aSh,aMk],[aMk,aBass],[aBass,aMid],[aMid,aTreb],[aTreb,aC1],[aC1,aC2],[cab1,cab2],[cab2,cab3],[cab3,cab4],[cab4,cabOut],[cabOut,aMaster]])a.connect(b);
   let cabOn=null;const AMP={inp:aHp,out:aMaster};
   /* DELAY: ping-pong, a tape's dulling in its repeats */
-  const dIn=G(1),dDry=G(1),dL=ctx.createDelay(2),dR=ctx.createDelay(2),dFb=G(.35),dTone=B('lowpass',3800,-6),   /* (Q in dB: no bump, so the loop never gains) */dMg=ctx.createChannelMerger(2),dWet=G(.3),dOut=G(1);
-  dIn.connect(dDry);dDry.connect(dOut);dIn.connect(dL);dL.connect(dR);dR.connect(dTone);dTone.connect(dFb);dFb.connect(dL);dL.connect(dMg,0,0);dR.connect(dMg,0,1);dMg.connect(dWet);dWet.connect(dOut);
-  const DELAY={inp:dIn,out:dOut};
+  /* THE ROCKIES (the DELAY): two delays in a loop, each the echo's time, the loop's repeats dulled by TONE. VALLEY: the first delay's
+     echoes on the left, the second's on the right (ping-pong); PEAK: both down the middle (straight echoes, one each time); SKY: both
+     through a 3-D panner (HRTF, as games place sounds round you) carried round your head in a circle, a sixth of the way each echo
+     (made only while SKY is picked). AVALANCHE (TAP held) feeds the loop back almost whole, so the echoes pile up and hold */
+  const dIn=G(1),dDry=G(1),dL=ctx.createDelay(4),dR=ctx.createDelay(4),dFb=G(.35),dTone=B('lowpass',3800,-6),   /* (Q in dB: no bump, so the loop never gains) */dMg=ctx.createChannelMerger(2),dWet=G(.3),dOut=G(1),
+    dLL=G(1),dLR=G(0),dRL=G(0),dRR=G(1),dSky=G(0);
+  dIn.connect(dDry);dDry.connect(dOut);dIn.connect(dL);dL.connect(dR);dR.connect(dTone);dTone.connect(dFb);dFb.connect(dL);
+  dL.connect(dLL);dL.connect(dLR);dR.connect(dRL);dR.connect(dRR);dLL.connect(dMg,0,0);dLR.connect(dMg,0,1);dRL.connect(dMg,0,0);dRR.connect(dMg,0,1);dMg.connect(dWet);dWet.connect(dOut);
+  dL.connect(dSky);dR.connect(dSky);
+  let sky=null,aval=false;const DELAY={inp:dIn,out:dOut};
+  function skyOn(dt){if(!sky){const pn=ctx.createPanner();pn.panningModel='HRTF';pn.distanceModel='inverse';pn.refDistance=1;pn.rolloffFactor=0;pn.positionY.value=0;
+      const o=ctx.createOscillator(),oc=ctx.createOscillator(),cw=ctx.createPeriodicWave(new Float32Array([0,1]),new Float32Array([0,0]),{disableNormalization:true});oc.setPeriodicWave(cw);
+      pn.positionX.value=0;pn.positionZ.value=0;o.connect(pn.positionX);const ng=G(-1);oc.connect(ng);ng.connect(pn.positionZ);o.start();oc.start();dSky.connect(pn);pn.connect(dWet);sky={pn,o,oc,ng};}   /* (x = sin, z = -cos: it starts in front of you) */
+    const f=1/(6*dt);ramp(sky.o.frequency,f,.05);ramp(sky.oc.frequency,f,.05);}
+  function skyOff(){if(!sky)return;const s=sky;sky=null;for(const o of [s.o,s.oc])try{o.stop();}catch(e){}for(const n of [s.o,s.oc,s.ng,s.pn])try{n.disconnect();}catch(e){}try{dSky.disconnect(s.pn);}catch(e){}}
+  E.avalanche=on=>{aval=!!on;E.apply();};E.aval=()=>aval;E.sky=()=>!!sky;E.echoTime=()=>dL.delayTime.value;
   /* REVERB: a hall made from noise (made again when SIZE moves); SHIMMER feeds the hall back into itself an octave up */
   const rIn=G(1),rDry=G(1),rPre=G(1),rCv=ctx.createConvolver(),rWet=G(.22),rOut=G(1),rShG=G(0);rCv.normalize=false;
   rIn.connect(rDry);rDry.connect(rOut);rIn.connect(rPre);rPre.connect(rCv);rCv.connect(rWet);rWet.connect(rOut);rShG.connect(rPre);
@@ -307,8 +321,12 @@ function Engine(ctx,outG){
     aC1.frequency.value=M.col[0][0];ramp(aC1.gain,M.col[0][1]);aC1.Q.value=M.col[0][2];aC2.frequency.value=M.col[1][0];ramp(aC2.gain,M.col[1][1]);aC2.Q.value=M.col[1][2];
     ramp(aMaster.gain,1.6*Math.pow(a.master,1.6));
     if(cabOn!==!!a.cab){try{aC2.disconnect();}catch(e){}aC2.connect(a.cab?cab1:cabOut);cabOn=!!a.cab;}
-    const dl=P.delay,bpm=(clock||M2.clock).bpm||120,dv=(DIVS.find(x=>x[0]===dl.div)||DIVS[2])[1],dt=Math.min(1.9,dv?dv*60/bpm:delFree(dl.time));
-    ramp(dL.delayTime,dt,.05);ramp(dR.delayTime,dt,.05);ramp(dFb.gain,Math.min(.9,dl.fb*.9));ramp(dWet.gain,dl.mix*1.2);ramp(dDry.gain,1-dl.mix*.35);
+    /* the echo's time: SELECT's note at the tapped tempo (TAP), else the desk's; FREE: one tap's length, else the TIME setting */
+    const dl=P.delay,tap=dl.tap>0?dl.tap:0,bpm=tap?60/tap:(clock||M2.clock).bpm||120,dv=(DIVS.find(x=>x[0]===dl.div)||DIVS[2])[1],dt=Math.min(3.9,dv?dv*60/bpm:tap||delFree(dl.time)),dmd=dl.mode||'VALLEY';
+    E.dt=dt;ramp(dL.delayTime,dt,.05);ramp(dR.delayTime,dt,.05);ramp(dFb.gain,aval&&dl.on?.995:Math.min(.9,dl.fb*.9),aval?.08:.03);ramp(dWet.gain,dl.mix*1.2);ramp(dDry.gain,1-dl.mix*.35);
+    ramp(dTone.frequency,1200*Math.pow(8,dl.tone==null?.5:dl.tone));
+    const dVa=dmd==='VALLEY',dPk=dmd==='PEAK';ramp(dLL.gain,dVa?1:dPk?.72:0);ramp(dRR.gain,dVa?1:dPk?.72:0);ramp(dLR.gain,dPk?.72:0);ramp(dRL.gain,dPk?.72:0);ramp(dSky.gain,dmd==='SKY'?1.2:0);
+    if(dmd==='SKY'&&dl.on)skyOn(dt);else skyOff();
     const v=P.verb;E.wetT=v.mix*1.4;ramp(rWet.gain,E.wetT);ramp(rDry.gain,1-v.mix*.5);
     /* OCEAN SWELL: TIDE's wave (a slow swell and ebb between MIX and full, in beats of the desk's tempo), the wheel, WAVE's rest */
     const s=P.swell,isT=s.on&&s.mode==='tide';
@@ -386,9 +404,9 @@ function Engine(ctx,outG){
   E.gLevel=()=>{if(!E.awake)return 0;gMet.getFloatTimeDomainData(gbuf);let s=0;for(const v of gbuf)s+=v*v;return Math.sqrt(s/gbuf.length);};
   E.inLevel=()=>{inMon.getFloatTimeDomainData(ibuf);let p=0;for(const v of ibuf){const a=Math.abs(v);if(a>p)p=a;}return p;};
   E.sndIn=sndIn;E.lfoOn=()=>!!lfo;E.shimOn=()=>!!shim;E.chain=()=>chainKey;
-  E.dispose=()=>{E.unfreeze(true);E.allOff();if(lfo)try{lfo.stop();}catch(e){}if(shim)shim.stop();clearTimeout(irT);
+  E.dispose=()=>{E.unfreeze(true);E.allOff();skyOff();if(lfo)try{lfo.stop();}catch(e){}if(shim)shim.stop();clearTimeout(irT);
     if(tide)try{tide.stop();}catch(e){}
-    setTimeout(()=>{for(const n of [hTone,hLvl,fzG,swG,whG,tideAmp,loopIn,padBus,vBus,pkLo,pkHi,tone,gVol,chainIn,sndIn,cIn,cp,cTone,cWet,cDry,cpG,drHp,drMid,drPre,drSh,drWarm,drLp,drOut,mIn,mDry,mDl,mFb,mDlG,mWet,mSum,mTr,mTrG,mDep,mTrD,mPhD,mPhFb,mPhG,...mPh,aHp,aPre,aSh,aMk,aBass,aMid,aTreb,aC1,aC2,cab1,cab2,cab3,cab4,cabOut,aMaster,dIn,dDry,dL,dR,dFb,dTone,dMg,dWet,dOut,rIn,rDry,rPre,rCv,rWet,rOut,rShG,preLim,lim])try{n.disconnect();}catch(e){}},300);};
+    setTimeout(()=>{for(const n of [hTone,hLvl,fzG,swG,whG,tideAmp,loopIn,padBus,vBus,pkLo,pkHi,tone,gVol,chainIn,sndIn,cIn,cp,cTone,cWet,cDry,cpG,drHp,drMid,drPre,drSh,drWarm,drLp,drOut,mIn,mDry,mDl,mFb,mDlG,mWet,mSum,mTr,mTrG,mDep,mTrD,mPhD,mPhFb,mPhG,...mPh,aHp,aPre,aSh,aMk,aBass,aMid,aTreb,aC1,aC2,cab1,cab2,cab3,cab4,cabOut,aMaster,dIn,dDry,dL,dR,dFb,dTone,dMg,dWet,dOut,dLL,dLR,dRL,dRR,dSky,rIn,rDry,rPre,rCv,rWet,rOut,rShG,preLim,lim])try{n.disconnect();}catch(e){}},300);};
   return E;}
 
 /* ---- the face (a plain prototype: GUITAR and AMP on top, the PEDALBOARD below) ---- */
@@ -484,6 +502,12 @@ function style(){if(styled)return;styled=true;const s=document.createElement('st
 .dw .ack{border-radius:50%;cursor:ns-resize}.dw .acfs{border-radius:50%;cursor:pointer}.dw .acfs.down{background:rgba(0,0,0,.25)}
 .dw .acpatch,.dw .acneedle{pointer-events:none}.dw .acn{transition:none}.dw .acled{border-radius:50%;pointer-events:none}
 .dw .ped.air.on .acled{background:radial-gradient(circle,#FFE8E0 0 22%,#FF3A24 55%,rgba(255,40,20,0) 100%);box-shadow:0 0 30px 12px rgba(255,50,30,.6)}
+.dw .ped.delay.rk{flex:0 0 63px;padding:0;background:#3B3C3E;border-radius:6px;overflow:hidden;box-shadow:0 2px 4px #000}
+.dw .rkf{position:absolute;left:0;top:0;transform-origin:0 0;transform:scale(.11423)}.dw .rkk,.dw .rkfs,.dw .rkled,.dw .rkslot,.dw .rkth,.dw .rksw,.dw .rkw,.dw .rkhalf{position:absolute}
+.dw .rkk{border-radius:50%;cursor:ns-resize}.dw .rkfs,.dw .rksw,.dw .rkw{cursor:pointer}.dw .rkfs{border-radius:50%}.dw .rkfs.down{background:rgba(0,0,0,.25)}
+.dw .rkslot,.dw .rkth,.dw .rkled,.dw .rkhalf{pointer-events:none}.dw .rkslot{background:linear-gradient(90deg,#1B1A18,#2C2A27 45%,#141311);border-radius:2px}.dw .rkth{transition:top .12s}
+.dw .rkled{border-radius:50%;filter:brightness(.3) saturate(.35);-webkit-mask:radial-gradient(circle,#000 58%,transparent 100%)}.dw .ped.rk.on .rkled.red,.dw .ped.rk.on .rkled.amber.blink{filter:brightness(1.15)}
+.dw .rkw.on{box-shadow:inset 0 -3px 0 rgba(255,236,190,.0)}
 .dw .ped.pad.cu{flex:0 0 67px;padding:0;background:#3E5A3A;border-radius:6px;overflow:hidden;box-shadow:inset 0 1px 0 rgba(255,255,255,.2),0 2px 4px #000}
 .dw .cuf{position:absolute;left:0;top:0;transform-origin:0 0;transform:scale(.11445)}.dw .cub,.dw .cuk,.dw .cufs,.dw .curing,.dw .cuglow,.dw .cuswing{position:absolute}
 .dw .cub{border-radius:14px;cursor:pointer;background:rgba(28,18,8,.34);transition:background .15s,box-shadow .15s}.dw .cub.on{background:rgba(255,226,160,.22);box-shadow:0 0 26px 8px rgba(255,205,120,.7),inset 0 0 18px rgba(255,240,200,.6);mix-blend-mode:screen}
@@ -541,7 +565,7 @@ const KN={'g.playk':['PLAY',v=>{const m=PLAYS[Math.round(v*3)];return m+' · '+P
   'g.strumk':['STRUM',v=>({OFF:'OFF: EVERY KEY AT ONCE',DOWN:'DOWN: EACH CHORD LOW TO HIGH','DOWN/UP':'DOWN/UP: DOWN, THEN THE NEXT CHORD UP'})[STRUMS[Math.round(v*2)]]],
   'amp.chan':['CHANNEL',v=>(AMPS[Object.keys(AMPS)[Math.round(v*3)]]||AMPS.clean).name],'amp.gain':['GAIN',pct],'amp.bass':['BASS',v=>((v-.5)*20).toFixed(1)+' DB'],'amp.mid':['MIDDLE',v=>((v-.5)*20).toFixed(1)+' DB'],'amp.treb':['TREBLE',v=>((v-.5)*20).toFixed(1)+' DB'],'amp.master':['MASTER',pct],
   'pad.level':['LEVEL',pct],'pad.air':['AIR',v=>v<.02?'OFF':pct(v)+' BREATH'],'pad.swell':['FADE IN',v=>v<.2?'QUICK':v<.6?'GENTLE':v<.85?'SLOW':'VERY SLOW'],
-  'delay.time':['TIME',v=>Math.round(delFree(v)*1000)+' MS'],'delay.fb':['REPEATS',pct],'delay.mix':['MIX',pct],'verb.size':['SIZE',v=>sizeOf(v).toFixed(1)+' S'],'verb.mix':['MIX',pct],'verb.shim':['SHIMMER',v=>v<.01?'OFF':pct(v)]};
+  'delay.time':['TIME',v=>Math.round(delFree(v)*1000)+' MS'],'delay.fb':['REP',v=>v<.02?'ONE ECHO':pct(v)],'delay.mix':['MIX',pct],'delay.tone':['TONE',v=>v<.25?'DARK, THROUGH THE PINES':v>.75?'BRIGHT, THIN MOUNTAIN AIR':Math.round(1200*Math.pow(8,v))+' HZ'],'delay.divk':['SELECT',v=>{const d=DIVS[Math.round(v*6)][0];return d==='FREE'?'FREE · TAP THE TIME':d+' · IN TIME';}],'verb.size':['SIZE',v=>sizeOf(v).toFixed(1)+' S'],'verb.mix':['MIX',pct],'verb.shim':['SHIMMER',v=>v<.01?'OFF':pct(v)]};
 /* OCEAN SWELL's face: Steve's photo (Skins\ocean-swell.jpg, 1008 × 1050, made 2026-11-24 from the sketch Skins\ocean-swell-sketch.png:
    the Great Wave engraved on sea-teal, four mode buttons with their own lights). The pedal is cut out of it (cut: x, y, w, h) and
    every live part laid on at the photo's own pixels, the whole scaled to the board (122 / 984). Its knob caps are cut from the photo
@@ -763,9 +787,34 @@ function cuFace(){const u=M2.fileUrl(CU.src),[cx,cy,cw,ch]=CU.cut,bg=(x,y)=>`bac
     `<i class="curing" style="${at(fx-r1-2,fy-r1-2,2*r1+4,2*r1+4)};${bg(fx-r1-2,fy-r1-2)};-webkit-mask:radial-gradient(circle,transparent ${r0}px,#000 ${r0+3}px ${r1-1}px,transparent ${r1+2}px)"></i>`+
     `<i class="cuglow" style="${at(fx-r1*1.5,fy-r1*1.5,r1*3,r1*3)}"></i>`+
     `<div class="cufs" data-s="pad" title="CUSHION on / off; while it holds a chord, a tap lets the chord go" style="${at(fx-fr,fy-fr,2*fr,2*fr)}"></div></div>`;}
+/* THE ROCKIES' face (the DELAY): Steve's picture (Skins\rockies.jpg, 848 × 1264, 2026-11-26, his brighter take: a granite pedal, a painted Rocky Mountain
+   valley, brass knobs and name plates, a slide switch, a big brass SELECT knob with the note lengths round it), framed on its stone
+   (110 / 1178). MIX TONE REP turn (their tops, photographed pointing up); SELECT turns to the printed notes (its second 1/4 · printed
+   again as 1/2); the slide switch's knob slides to PEAK, VALLEY or SKY (a click on the switch steps it, on a word picks it); the amber light
+   blinks with the echoes while it is on, the red one is lit while it is on (both photographed lit, dimmed while off); TAP: tapped twice
+   or more it sets the tempo (FREE: the echo is one tap long), held it is the AVALANCHE; BYPASS switches it */
+const RK={src:'mixtape2/Skins/rockies.jpg',iw:848,ih:1264,cut:[152,110,550,1068],
+  knobs:[['delay.mix',266,284],['delay.tone',428,284],['delay.fb',590,284]],kr:46,
+  sel:[422,775,104,3],selAng:[-89,-60,-16,23,62,89,109],   /* (SELECT: its middle, size, where its pointer was photographed; the seven notes' angles from straight up) */
+  half:{from:[262,797,72,46],to:[538,748,72,46],at:[571,772]},   /* (the second 1/4 · covered with plain brass from below 1/16, mirrored so its brushing runs the same way, and lettered 1/2) */
+  sw:{slot:[223,534,29,86],thumb:[221,551,32,30],pos:{PEAK:535,VALLEY:562,SKY:589},   /* (the slot 534 … 620, the knob 30 high: at the top, the middle, the bottom) */
+    words:{PEAK:[282,506,120,34],VALLEY:[282,550,150,38],SKY:[282,594,90,36]}},
+  amber:[276,890,38],red:[584,887,40],   /* (each light with its glow on the stone: dimmed while off, fading out at the edge) */tap:[271,998,54],byp:[578,998,54]};
+function rkFace(){const u=M2.fileUrl(RK.src),[cx,cy,cw,ch]=RK.cut,bg=(x,y)=>`background:url('${u}') ${-x}px ${-y}px/${RK.iw}px ${RK.ih}px no-repeat`,
+    at=(x,y,w,h)=>`left:${x-cx}px;top:${y-cy}px;width:${w}px;height:${h}px`,[sx,sy,sr]=RK.sel,W=RK.sw,dot=(c,[x,y,r],cls)=>`<i class="${cls}" style="${at(x-r,y-r,2*r,2*r)};${bg(x-r,y-r)}"></i>`;
+  return `<div class="rkf" style="width:${cw}px;height:${ch}px;${bg(cx,cy)}">`+
+    `<canvas class="rkhalf" width="${RK.half.to[2]}" height="${RK.half.to[3]}" style="${at(...RK.half.to)}"></canvas>`+
+    `<div class="rkk sel" data-k="delay.divk" data-off="${RK.sel[3]}" title="select: the echo's note (in time with the desk, or the tapped tempo); FREE: as long as one tap" style="${at(sx-sr,sy-sr,2*sr,2*sr)};${bg(sx-sr,sy-sr)}"></div>`+
+    RK.knobs.map(([k,x,y])=>{const r=RK.kr;return `<div class="rkk" data-k="${k}" title="${KN[k][0].toLowerCase()}" style="${at(x-r,y-r,2*r,2*r)};${bg(x-r,y-r)}"></div>`;}).join('')+
+    `<i class="rkslot" style="${at(...W.slot)}"></i><i class="rkth" style="${at(...W.thumb)};${bg(W.thumb[0],W.thumb[1])}"></i>`+
+    `<div class="rksw" data-b="rk.mode" title="PEAK: straight echoes · VALLEY: ping-pong · SKY: round your head (click to step)" style="${at(W.thumb[0]-6,W.slot[1]-14,W.thumb[2]+12,W.slot[3]+28)}"></div>`+
+    Object.entries(W.words).map(([m,[x,y,w,h]])=>`<div class="rkw" data-b="rk.m.${m}" title="${m}: ${DMTIP[m].toLowerCase()}" style="${at(x,y,w,h)}"></div>`).join('')+
+    dot('a',RK.amber,'rkled amber')+dot('r',RK.red,'rkled red')+
+    `<div class="rkfs" data-b="rk.tap" title="TAP: tap twice or more in time for the echoes' tempo; hold it for the AVALANCHE" style="${at(RK.tap[0]-RK.tap[2],RK.tap[1]-RK.tap[2],2*RK.tap[2],2*RK.tap[2])}"></div>`+
+    `<div class="rkfs" data-s="delay" title="THE ROCKIES on / off" style="${at(RK.byp[0]-RK.byp[2],RK.byp[1]-RK.byp[2],2*RK.byp[2],2*RK.byp[2])}"></div></div>`;}
 const PEDALS=[['swell','OCEAN SWELL','notes rise like a swell on the sea: each note, a wave, the tide, or the hall rising'],['comp','AIR COMPRESSOR','evens and lengthens: squeeze, attack, tone, blend'],['drive','SUNSET DRIVE','a warm overdrive: drive, tone, warmth, level'],['harm','BARBERSHOP','a harmonizer: voices in the key, octaves, a doubled guitar, crystals; held, it freezes'],['mod','LIGHTHOUSE','chorus · flanger · phaser · vibrato · tremolo: rate, depth, mix'],['pad','CUSHION','a soft pad under the guitar: any two of six sounds; it holds what you play until the next chord'],
-  ['delay','DELAY','echoes, in time with the desk'],['verb','REVERB','a hall, shimmer above it']];
-const PNAME={swell:'OCEAN SWELL',comp:'AIR COMPRESSOR',drive:'SUNSET DRIVE',harm:'BARBERSHOP',mod:'LIGHTHOUSE',pad:'CUSHION',delay:'DELAY',verb:'REVERB'};
+  ['delay','THE ROCKIES','echoes off the mountains: straight, ping-pong, or round your head; in time with the desk or tapped'],['verb','REVERB','a hall, shimmer above it']];
+const PNAME={swell:'OCEAN SWELL',comp:'AIR COMPRESSOR',drive:'SUNSET DRIVE',harm:'BARBERSHOP',mod:'LIGHTHOUSE',pad:'CUSHION',delay:'THE ROCKIES',verb:'REVERB'};
 /* a sound saved before BARBERSHOP (HARMONY's MODE and interval) as BARBERSHOP's STYLE and pages; and before the CUSHION (the PAD's one sound) */
 function oldHarm(v){const pd=v&&v.pad;if(pd&&typeof pd.ch==='string'){if(pd.ch==='air'){pd.ch=['warm'];pd.air=.7;}else pd.ch=[pd.ch];}
   const h=v&&v.harm;if(!h||!h.mode)return v;const m=h.mode;h.style={QUAD:'QUARTET',OCTAVES:'OCTAVER',CRYSTALS:'CRYSTALS'}[m]||'DIATONIC';h.s=h.s||{};
@@ -790,8 +839,8 @@ const DEF={id:'driftwood',name:'DRIFTWOOD electric guitar',short:'DRIFTWOOD',typ
     const down=new Set(),sus=new Set(),typed=new Set();
     const plugged=s=>M2.patch.at(uid,s).length>0;
     /* (PLAY and the amp's CHANNEL are switches in four steps on a knob) */
-    const get=k=>k==='harm.val'?bsGet():k==='mod.modek'?MMODES.indexOf(S.v.mod.mode)/4:k==='g.playk'?PLAYS.indexOf(mode())/3:k==='amp.chan'?AMPK.indexOf(S.v.amp.model)/3:k==='g.strumk'?STRUMS.indexOf(S.v.g.strum)/2:k.split('.').reduce((o,p)=>o&&o[p],S.v),
-      put=(k,v)=>{if(k==='harm.val'){bsPut(v);return;}if(k==='mod.modek'){S.v.mod.mode=MMODES[clamp(Math.round(v*4),0,4)];return;}if(k==='g.playk'){S.v.g.play=PLAYS[clamp(Math.round(v*3),0,3)];return;}if(k==='amp.chan'){S.v.amp.model=AMPK[clamp(Math.round(v*3),0,3)];return;}
+    const get=k=>k==='harm.val'?bsGet():k==='delay.divk'?Math.max(0,DIVS.findIndex(x=>x[0]===S.v.delay.div))/6:k==='mod.modek'?MMODES.indexOf(S.v.mod.mode)/4:k==='g.playk'?PLAYS.indexOf(mode())/3:k==='amp.chan'?AMPK.indexOf(S.v.amp.model)/3:k==='g.strumk'?STRUMS.indexOf(S.v.g.strum)/2:k.split('.').reduce((o,p)=>o&&o[p],S.v),
+      put=(k,v)=>{if(k==='harm.val'){bsPut(v);return;}if(k==='mod.modek'){S.v.mod.mode=MMODES[clamp(Math.round(v*4),0,4)];return;}if(k==='delay.divk'){S.v.delay.div=DIVS[clamp(Math.round(v*6),0,6)][0];return;}if(k==='g.playk'){S.v.g.play=PLAYS[clamp(Math.round(v*3),0,3)];return;}if(k==='amp.chan'){S.v.amp.model=AMPK[clamp(Math.round(v*3),0,3)];return;}
         if(k==='g.strumk'){S.v.g.strum=STRUMS[clamp(Math.round(v*2),0,2)];return;}   /* (STRUM: a switch in three steps on a knob) */
         const p=k.split('.'),l=p.pop();p.reduce((o,q)=>o[q],S.v)[l]=v;};
 
@@ -814,7 +863,7 @@ const DEF={id:'driftwood',name:'DRIFTWOOD electric guitar',short:'DRIFTWOOD',typ
       <div class="ped mod lh" data-p="mod" title="LIGHTHOUSE: chorus, flanger, phaser, vibrato, tremolo; its beam turns at the RATE">${lhFace()}</div>
       <div class="loop" title="PAD, DELAY and REVERB sit in the amp's effects loop: after its drive"><span>AMP LOOP →</span></div>
       <div class="ped pad cu" data-p="pad" title="CUSHION: a soft pad under the guitar; it holds what you play until the next chord">${cuFace()}</div>
-      ${ped('delay','DELAY',`<div class="chip" data-c="delay.div"></div><div class="row">${knob('delay.time','sm')}${knob('delay.fb','sm')}${knob('delay.mix','sm')}</div>`)}
+      <div class="ped delay rk" data-p="delay" title="THE ROCKIES: echoes off the mountains; PEAK straight, VALLEY ping-pong, SKY round your head">${rkFace()}</div>
       ${ped('verb','REVERB',`<div class="row">${knob('verb.size','sm')}${knob('verb.mix','sm')}${knob('verb.shim','sm')}</div>`)}</div>`;
     const $=s=>m.querySelector(s),$$=s=>[...m.querySelectorAll(s)];
     /* a picture's knobs cut out by their own shape (P.mask): made once from the picture's bytes (a canvas may not read back a file://
@@ -904,11 +953,11 @@ const DEF={id:'driftwood',name:'DRIFTWOOD electric guitar',short:'DRIFTWOOD',typ
     function flash(a,b){msg=[a,b||''];show();clearTimeout(flashT);flashT=setTimeout(()=>{msg=null;show();},1800);}
     const chipText={'mod.mode':()=>S.v.mod.mode,'delay.div':()=>S.v.delay.div};
     function paint(){const v=S.v,vw=S.view;lampsPaint();m.classList.toggle('nog',!vw.g);m.classList.toggle('noa',!vw.a);m.classList.toggle('nop',!vw.p);
-      for(const c of $$('[data-k]')){const x=clamp(+get(c.dataset.k)||0,0,1),a=c.dataset.k==='mod.modek'?LH.ticks[MMODES.indexOf(v.mod.mode)]:-135+270*x;c.style.transform=`rotate(${a-(+c.dataset.off||0)}deg)`;}   /* (a photo's knob cap: from where its pointer was photographed) */
+      for(const c of $$('[data-k]')){const x=clamp(+get(c.dataset.k)||0,0,1),a=c.dataset.k==='mod.modek'?LH.ticks[MMODES.indexOf(v.mod.mode)]:c.dataset.k==='delay.divk'?RK.selAng[Math.max(0,DIVS.findIndex(d=>d[0]===v.delay.div))]:-135+270*x;c.style.transform=`rotate(${a-(+c.dataset.off||0)}deg)`;}   /* (a photo's knob cap: from where its pointer was photographed) */
       for(const p of $$('[data-p]'))p.classList.toggle('on',!!v[p.dataset.p].on);
       for(const c of $$('[data-c]'))c.textContent=chipText[c.dataset.c]();
-      bsDraw();bspRender();lhGo();cuGo();if(lhMode!==v.mod.mode+(v.mod.on?'*':''))lhText();
-      $('[data-kw="delay.time"]').classList.toggle('off',v.delay.div!=='FREE');const tg=$('.tgl');if(tg)tg.dataset.pos=v.g.pick;   /* (the pickup lever thrown to its place) */
+      bsDraw();bspRender();lhGo();cuGo();rkPaint();if(lhMode!==v.mod.mode+(v.mod.on?'*':''))lhText();
+      const tg=$('.tgl');if(tg)tg.dataset.pos=v.g.pick;   /* (the pickup lever thrown to its place) */
       for(const b of $$('[data-b]')){const d=b.dataset.b;let on=false;
         if(d.startsWith('pick.'))on=v.g.pick===d.slice(5);else if(d.startsWith('strum.'))on=v.g.strum===d.slice(6);else if(d.startsWith('amp.'))on=v.amp.model===d.slice(4);
         else if(d==='cab')on=!!v.amp.cab;else if(d==='keys')on=comp;else if(d.startsWith('pad.'))on=v.pad.ch.includes(d.slice(4));else if(d.startsWith('swm.'))on=v.swell.mode===d.slice(4);else if(d==='swell.wheel')on=!!v.swell.wheel;else if(d.startsWith('view.'))on=!!vw[d.slice(5)];b.classList.toggle('on',on);}
@@ -1067,6 +1116,22 @@ const DEF={id:'driftwood',name:'DRIFTWOOD electric guitar',short:'DRIFTWOOD',typ
       if(!run){lLast=0;return;}
       const dt=lLast?Math.min(.1,(now-lLast)/1000):0;lLast=now;lPh=(lPh+dt*rateOf(S.v.mod.rate))%1;beamDraw();lRaf=requestAnimationFrame(lhFrame);}
     const lhGo=()=>{if(!lRaf&&!dead)lRaf=requestAnimationFrame(lhFrame);};
+    /* ---- THE ROCKIES: TAP (two taps or more within 2.5 s: their mean gap is the beat; FREE: the echo itself), held the AVALANCHE; the
+       slide switch's knob at its word; the amber light blinking with the echoes while it is on and in sight ---- */
+    let rkTaps=[],rkDown=0,rkBlinkT=0;
+    function rkTap(now){rkTaps=rkTaps.filter(x=>now-x<2500);rkTaps.push(now);if(rkTaps.length<2)return flash('THE ROCKIES · TAP','TAP AGAIN IN TIME');
+      const g=[];for(let i=1;i<rkTaps.length;i++)g.push(rkTaps[i]-rkTaps[i-1]);const b=clamp(g.slice(-3).reduce((a,x)=>a+x,0)/Math.min(3,g.length)/1000,.06,2);
+      S.v.delay.tap=+b.toFixed(4);if(!S.v.delay.on)S.v.delay.on=true;S.edited=true;apply();paint();host.changed('knob');
+      flash('THE ROCKIES · TAP',S.v.delay.div==='FREE'?'ECHO '+Math.round(b*1000)+' MS':Math.round(60/b)+' BPM · '+S.v.delay.div+' = '+Math.round(E.dt*1000)+' MS');}
+    function avalStart(){E.avalanche(true);flash('THE ROCKIES · AVALANCHE','THE ECHOES PILE UP · LET GO TO LET THEM FALL');}
+    function avalEnd(){E.avalanche(false);flash('THE ROCKIES','AVALANCHE OVER');}
+    function rkPaint(){const v=S.v.delay,th=$('.rkth');if(th)th.style.top=(RK.sw.pos[v.mode||'VALLEY']-RK.cut[1])+'px';rkBlink();}
+    function rkBlink(){if(rkBlinkT||dead)return;const led=$('.rkled.amber'),step=()=>{rkBlinkT=0;if(dead||!S.v.delay.on||!inSight){led.classList.remove('blink');return;}
+        led.classList.add('blink');setTimeout(()=>led.classList.remove('blink'),Math.min(90,E.dt*400));rkBlinkT=setTimeout(step,Math.max(60,(E.dt||.5)*1000));};step();}
+    /* the 1/2 lettered over the picture's second 1/4 · (plain brass from below 1/16 under it, mirrored), once the picture's bytes are read */
+    (async()=>{let bmp;try{const f=host.files||window.mixtapeFiles,u=await f.read(RK.src);bmp=await createImageBitmap(new Blob([u]));}catch(e){console.warn('DRIFTWOOD ROCKIES lettering',e);return;}if(dead)return;
+      const c=$('.rkhalf'),g=c.getContext('2d'),H=RK.half,[fx,fy,fw,fh]=H.from,[tx,ty,tw,th]=H.to;g.save();g.translate(tw,0);g.scale(-1,1);g.drawImage(bmp,fx,fy,fw,fh,0,0,tw,th);g.restore();g.globalCompositeOperation='destination-in';g.filter='blur(5px)';g.fillRect(8,8,tw-16,th-16);g.filter='none';g.globalCompositeOperation='source-over';   /* (its edges feathered into the brass round it) */
+      g.font='500 40px Bahnschrift,"Segoe UI",Arial';g.fontStretch='condensed';g.textAlign='center';g.textBaseline='middle';g.fillStyle='rgba(52,34,16,.9)';g.fillText('1/2',H.at[0]-tx,H.at[1]-ty+1);})();
     /* the CUSHION's swing (see CU): sways while it holds a chord, a slow swing back and forth, settling as it lets go. Made from the
        picture's bytes: the swing cut out by its outline, and the porch with the swing filled in row by row from either side of it */
     const cuCv=$('.cuswing'),cg=cuCv.getContext('2d');let cuPlate=null,cuSw=null,cuRaf=0,cuLast=0,cuPh=0,cuAmp=0,cuShown=false;
@@ -1220,6 +1285,8 @@ const DEF={id:'driftwood',name:'DRIFTWOOD electric guitar',short:'DRIFTWOOD',typ
       if(id==='pad'&&S.v.pad.on&&padHeld.size){padLetGo();return flash('CUSHION','LET GO · TAP AGAIN TO SWITCH IT OFF');}   /* (holding a chord: a tap lets it go, the pedal stays on) */   /* (frozen: a tap lets the freeze go, the pedal stays on) */
       const p=S.v[id];p.on=!p.on;if(id==='harm'&&!p.on){E.unfreeze();if(learn){clearTimeout(learn.t);learn=null;}}S.edited=true;apply();paint();host.changed('switch');flash(PNAME[id],p.on?'ON':'OFF');}
     function button(b){const v=S.v;
+      if(b==='rk.tap')return rkTap(rkDown||performance.now());
+      if(b==='rk.mode'||b.startsWith('rk.m.')){const dl=v.delay;dl.mode=b==='rk.mode'?DMODES[(DMODES.indexOf(dl.mode||'VALLEY')+1)%3]:b.slice(5);S.edited=true;apply();paint();host.changed('switch');return flash('THE ROCKIES · '+dl.mode,DMTIP[dl.mode]);}
       if(b==='prev'||b==='next')return usePreset(S.preset+(b==='next'?1:-1));
       if(b==='save')return askName();
       if(b.startsWith('view.')){const k=b.slice(5);S.view[k]=!S.view[k];paint();host.changed('view');if(k==='p')seaStill();
@@ -1263,12 +1330,13 @@ const DEF={id:'driftwood',name:'DRIFTWOOD electric guitar',short:'DRIFTWOOD',typ
       if(d.k){const k=d.k,y0=e.clientY,u0=+get(k)||0,h=t.getBoundingClientRect().height*5;let moved=false;   /* (the LIGHTHOUSE's MODE: a click without a drag steps to the next sound) */
         drag(e,ev=>{if(Math.abs(y0-ev.clientY)>3)moved=true;if(moved)set(k,clamp(u0+(y0-ev.clientY)/h,0,1));},()=>{if(k==='mod.modek'&&!moved)cycle('mod.mode',1);});return;}
       /* (BARBERSHOP's footswitch and KEY: held half a second, they FREEZE and LEARN instead) */
-      if(d.b||d.s||d.c){t.classList.add('down');const hb=d.s==='harm'?bsFreeze:d.b==='bs.key'?learnStart:null;let held=false;const ht=hb?setTimeout(()=>{held=true;hb();},550):0;
-        drag(e,()=>{},()=>{clearTimeout(ht);t.classList.remove('down');if(held)return;if(d.b)button(d.b);else if(d.s)stomp(d.s);else cycle(d.c,1);});}});
-    m.addEventListener('wheel',e=>{const d=e.target.dataset||{};if(d.k){e.preventDefault();e.stopPropagation();set(d.k,clamp(get(d.k)-Math.sign(e.deltaY)*(d.k==='harm.val'?bsStep():d.k==='g.playk'||d.k==='amp.chan'?1/3:d.k==='g.strumk'?1/2:d.k==='mod.modek'?1/4:.03),0,1));}   /* (PLAY, CHANNEL and STRUM, and VALUE on a list: a place a tick) */
+      if(d.b||d.s||d.c){t.classList.add('down');if(d.b==='rk.tap')rkDown=performance.now();const hb=d.s==='harm'?bsFreeze:d.b==='bs.key'?learnStart:d.b==='rk.tap'?avalStart:null;let held=false;const ht=hb?setTimeout(()=>{held=true;hb();},550):0;
+        drag(e,()=>{},()=>{clearTimeout(ht);t.classList.remove('down');if(held){if(d.b==='rk.tap')avalEnd();return;}if(d.b)button(d.b);else if(d.s)stomp(d.s);else cycle(d.c,1);});}});
+    m.addEventListener('wheel',e=>{const d=e.target.dataset||{};if(d.k){e.preventDefault();e.stopPropagation();set(d.k,clamp(get(d.k)-Math.sign(e.deltaY)*(d.k==='harm.val'?bsStep():d.k==='g.playk'||d.k==='amp.chan'?1/3:d.k==='g.strumk'?1/2:d.k==='mod.modek'?1/4:d.k==='delay.divk'?1/6:.03),0,1));}   /* (PLAY, CHANNEL and STRUM, and VALUE on a list: a place a tick) */
       else if(d.c){e.preventDefault();e.stopPropagation();cycle(d.c,e.deltaY>0?1:-1);}},{passive:false});
     m.addEventListener('dblclick',e=>{const d=e.target.dataset||{};if(!d.k)return;e.stopPropagation();
       if(d.k==='harm.val'){const pg=bsMain(),L=bsList(pg);if(pg[3]!=null)set(d.k,L?L.indexOf(pg[3])/(L.length-1):pg[3]);return;}   /* (VALUE: the page shown back where it starts) */
+      if(d.k==='delay.divk'){S.v.delay.tap=0;set(d.k,2/6);return flash('THE ROCKIES','1/8 · IN TIME WITH THE DESK AGAIN');}   /* (SELECT double-clicked: back to the desk's tempo) */
       set(d.k,d.k==='g.playk'?1/3:d.k==='mod.modek'?0:d.k.split('.').reduce((o,p)=>o&&o[p],V0));});
 
     /* ---- start ---- */
@@ -1279,7 +1347,7 @@ const DEF={id:'driftwood',name:'DRIFTWOOD electric guitar',short:'DRIFTWOOD',typ
     return {node:s=>s==='out'?outG:s==='in'?E.sndIn:null,
       receive(sock,msg){if(sock==='keys')key(msg);return true;},
       plugged(sock){if(sock==='keys'){allUp();if(comp&&plugged('keys'))compKeys(false);kinLamp();}if(sock==='in')watch();},
-      visible(v){inSight=v!==false;if(inSight){seaGo();gaugeGo();tailsGo();bsGo();lhGo();cuGo();}},   /* (out of sight the sea is not drawn) */
+      visible(v){inSight=v!==false;if(inSight){seaGo();gaugeGo();tailsGo();bsGo();lhGo();cuGo();rkBlink();}},   /* (out of sight the sea is not drawn) */
       /* for tools\probes\m2-driftwood.js */
       probe:()=>({tails:{lv:+tLv.toFixed(2),moving:!!tRaf},gauge:{angle:+gA.toFixed(1),gr:+E.compGR().toFixed(1),moving:!!gRaf},sea:{ready:!!sea,running:!!seaRaf,frames:seaFrames,lv:+seaLv.toFixed(2),t:+seaT.toFixed(1)},samples:SAMP.state,loaded:SAMP.buf.size,notes:{soft:SAMP.by.soft.length,hard:SAMP.by.hard.length},awake:E.awake,voices:E.voices.length,live:E.voices.filter(v=>!v.released).length,
         harm:E.voices.filter(v=>v.harm).length,rev:E.voices.filter(v=>v.oneShot).length,keyBufs:KEYC.size,queued:RQ.length,level:+E.level().toFixed(4),chain:E.chain(),lfo:E.lfoOn(),shimmer:E.shimOn(),
@@ -1287,9 +1355,9 @@ const DEF={id:'driftwood',name:'DRIFTWOOD electric guitar',short:'DRIFTWOOD',typ
         bs:{on:S.v.harm.on,style:S.v.harm.style,preset:bsLabel(),main:bsMain()[1]+' '+bsText(bsMain()),panel:bspOpen,drag:bspDrag,key:bsKey(),auto:autoK&&NM[autoK.key]+' '+autoK.scale,learning:learn?learn.notes.length:false,frozen:E.frozen(),
           pole:{ph:+bPh.toFixed(2),running:!!bRaf},singers:sLv.map(x=>+x.toFixed(2)),blink:bsLed.classList.contains('blink'),screen:bsEdit>performance.now()?bsMsg.join(' · '):S.v.harm.on?'on':'closed',
           harm:E.voices.filter(v=>v.harm).map(v=>v.n+(v.oneShot?'r':'')+'@'+v.slot)}}),
-      bsVoices:n=>bsVoices(n).map(x=>x.n),debugHold:w=>w==='fs'?bsFreeze():learnStart(),
-      debugSet:(k,v)=>set(k,v,true),debugSea:()=>{if(sea)sea.draw(...seaSize(),seaT+=.03,seaLv);},debugBeam:ph=>{lPh=ph;beamDraw();},padVoice:n=>padHeld.get(n),gLevel:()=>E.gLevel(),padFollow:()=>+folG.toFixed(3),cuSwing:()=>({amp:+cuAmp.toFixed(3),shown:cuShown,ready:!!cuPlate}),padLv:()=>padE&&padE.P.lv,padP:()=>padE&&padE.P,debugHush:()=>{clearTimeout(pendT);pend=null;padLetGo();E.allOff();if(padE)padE.voices.slice().forEach(v=>v.kill(ctx.currentTime));padHeld.clear();},debugButton:b=>button(b),debugStomp:s=>stomp(s),debugCycle:(c,d)=>cycle(c,d||1),harmOf,
-      destroy(){dead=true;clearInterval(folT);removeEventListener('pointerup',bspUp);removeEventListener('keydown',bspKey);if(seaRaf)cancelAnimationFrame(seaRaf);if(bRaf)cancelAnimationFrame(bRaf);clearTimeout(bsT);if(learn)clearTimeout(learn.t);if(gRaf)cancelAnimationFrame(gRaf);if(tRaf)cancelAnimationFrame(tRaf);if(sea)sea.dispose();clearTimeout(flashT);clearTimeout(sleepT);clearTimeout(pendT);clearTimeout(kinT);if(comp)compKeys(false);if(offMidi)offMidi();offStat();offIn();offTempo();
+      bsVoices:n=>bsVoices(n).map(x=>x.n),debugHold:w=>w==='fs'?bsFreeze():w==='rk.tap'?avalStart():learnStart(),debugUnhold:w=>{if(w==='rk.tap')avalEnd();},
+      debugSet:(k,v)=>set(k,v,true),debugSea:()=>{if(sea)sea.draw(...seaSize(),seaT+=.03,seaLv);},debugBeam:ph=>{lPh=ph;beamDraw();},padVoice:n=>padHeld.get(n),gLevel:()=>E.gLevel(),padFollow:()=>+folG.toFixed(3),rk:()=>({mode:S.v.delay.mode,div:S.v.delay.div,tap:S.v.delay.tap,dt:+(E.dt||0).toFixed(4),echo:+E.echoTime().toFixed(4),sky:E.sky(),aval:E.aval()}),rkTap:t=>rkTap(t),cuSwing:()=>({amp:+cuAmp.toFixed(3),shown:cuShown,ready:!!cuPlate}),padLv:()=>padE&&padE.P.lv,padP:()=>padE&&padE.P,debugHush:()=>{clearTimeout(pendT);pend=null;padLetGo();E.allOff();if(padE)padE.voices.slice().forEach(v=>v.kill(ctx.currentTime));padHeld.clear();},debugButton:b=>button(b),debugStomp:s=>stomp(s),debugCycle:(c,d)=>cycle(c,d||1),harmOf,
+      destroy(){dead=true;clearInterval(folT);clearTimeout(rkBlinkT);if(E.aval())E.avalanche(false);removeEventListener('pointerup',bspUp);removeEventListener('keydown',bspKey);if(seaRaf)cancelAnimationFrame(seaRaf);if(bRaf)cancelAnimationFrame(bRaf);clearTimeout(bsT);if(learn)clearTimeout(learn.t);if(gRaf)cancelAnimationFrame(gRaf);if(tRaf)cancelAnimationFrame(tRaf);if(sea)sea.dispose();clearTimeout(flashT);clearTimeout(sleepT);clearTimeout(pendT);clearTimeout(kinT);if(comp)compKeys(false);if(offMidi)offMidi();offStat();offIn();offTempo();
         if(padE)padE.dispose();E.dispose();host.engine.busy(uid,false);setTimeout(()=>{try{outG.disconnect();}catch(e){}},350);}};}};
 M2.define(DEF);
 M2.driftwood={Engine,SAMP,PRESETS,fresh,harmOf,harmIn,guessKey,loadSamples,played:(ctx,n,lay,rr)=>{const r=nearest(n,lay,rr);return r&&render(ctx,r,n);}};   /* (played: a note as DRIFTWOOD plays it, for toolsprobesm2-driftwood-tuning.js) */
