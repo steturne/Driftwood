@@ -43,10 +43,18 @@ const muteTc=v=>.03+.6*Math.pow(1-v,2);               /* MUTE: how fast a muted 
 const delFree=v=>.06*Math.pow(25,v);                  /* DELAY TIME, free: 60 ms … 1.5 s */
 /* SPACE TRAVELER (the REVERB): the original Crazy Dream (crazy-dream.js, from Core Sample; Steve: "spot on") in three sizes. TIME runs
    each mode's own range (its middle the mode's usual length); GALAXY at TIME 0.96 and PRE-DELAY 0.16 is Crazy Dream's own "Crazy dream" preset */
-const VMODES={SHUTTLE:{size:.3,mod:.15,rate:.35,lowCut:600,highCut:10000,t:v=>.4*Math.pow(10,v),trim:1.3},   /* an Abbey Road plate: short, bright, its lows and top trimmed */
+const VMODES={SHUTTLE:{plate:true,t:v=>.5*Math.pow(6,v),trim:1.7},   /* HORIZON's PLATE: an Abbey Road plate, small, quick and bright, its lows (600 Hz) and top (10 kHz) cut; 0.5 … 3 s, Steve's */
   HANGAR:{size:.5,mod:.12,rate:.25,lowCut:120,highCut:6000,t:v=>.3*Math.pow(15,v),trim:1.15},                  /* a room */
   GALAXY:{size:.9,mod:.45,rate:.2,lowCut:90,highCut:7000,t:v=>1.5*Math.pow(20/1.5,v),trim:1}},   /* (1.5 … 20 s, Steve; TIME 0.96: Crazy Dream's own 18 s) */                      /* Crazy Dream itself */
-  VMTIP={SHUTTLE:'A SHORT BRIGHT PLATE',HANGAR:'A ROOM',GALAXY:'CRAZY DREAM: HUGE, SLOW AND DRIFTING'},VMOD=Object.keys(VMODES);let vmNow='HANGAR';   /* (the mode last applied: TIME's words are in its range) */
+  VMTIP={SHUTTLE:'A SMALL STEEL PLATE, QUICK AND BRIGHT',HANGAR:'A ROOM',GALAXY:'CRAZY DREAM: HUGE, SLOW AND DRIFTING'},VMOD=Object.keys(VMODES);let vmNow='HANGAR';   /* (the mode last applied: TIME's words are in its range) */
+/* SHUTTLE's ring: HORIZON's PLATE (Steve, 2026-11-26: SHUTTLE sounded much like HANGAR): a steel plate's ring, dense from the first
+   millisecond (no early echoes, so no room), dying away over T, its highs a little sooner and its lows a little later; left and right
+   each their own, so it is wide; made at the level the dry sound has */
+function plateIR(ctx,T){const sr=ctx.sampleRate,len=Math.round(sr*Math.min(5,T*1.2+.05)),b=ctx.createBuffer(2,len,sr);
+  const aL=Math.exp(-2*Math.PI*700/sr),aH=Math.exp(-2*Math.PI*4500/sr),kL=Math.exp(-6.91/(T*1.15*sr)),kM=Math.exp(-6.91/(T*sr)),kH=Math.exp(-6.91/(T*.6*sr)),kA=Math.exp(-1/(.003*sr));
+  let e=0;for(let ch=0;ch<2;ch++){const d=b.getChannelData(ch);let lo=0,lh=0,gL=1,gM=1,gH=1,ga=1;
+    for(let i=0;i<len;i++){const n=Math.random()*2-1;lo=lo*aL+n*(1-aL);const r=n-lo;lh=lh*aH+r*(1-aH);d[i]=(lo*gL+lh*gM+(r-lh)*gH)*(1-ga);gL*=kL;gM*=kM;gH*=kH;ga*=kA;e+=d[i]*d[i];}}
+  const s=.8/Math.sqrt(e/2);for(let ch=0;ch<2;ch++){const d=b.getChannelData(ch);for(let i=0;i<len;i++)d[i]*=s;}return b;}
 let cdP=null;const crazyDream=()=>window.CrazyDream?Promise.resolve(window.CrazyDream):cdP||(cdP=new Promise((ok,no)=>{const s=document.createElement('script');s.src=M2.fileUrl('crazy-dream.js');
   s.onload=()=>ok(window.CrazyDream);s.onerror=()=>{cdP=null;no(new Error('crazy-dream.js is missing'));};document.head.appendChild(s);}));
 const rateOf=v=>.1*Math.pow(80,v);                    /* MOD RATE: 0.1 … 8 Hz */
@@ -276,12 +284,21 @@ function Engine(ctx,outG){
   /* SPACE TRAVELER (the REVERB): the guitar straight through (rDry) and Crazy Dream's reverb alone (its own mix at 1) beside it (rWet).
      MIX blends them; PARALLEL makes it a send: the guitar at full always, MIX how much goes to the reverb. Crazy Dream is made when the
      pedal goes on and let go when it goes off (its 8 lines and drifts cost nothing then) */
-  const rIn=G(1),rDry=G(1),rSend=G(1),rWet=G(.22),rOut=G(1);
-  rIn.connect(rDry);rDry.connect(rOut);rIn.connect(rSend);rWet.connect(rOut);
-  let cd=null,cdWant=false;const VERB={inp:rIn,out:rOut};
-  function cdOn(){cdWant=true;if(cd)return;if(!window.CrazyDream){crazyDream().then(()=>{if(cdWant&&!cd)E.apply();}).catch(e=>console.warn('DRIFTWOOD SPACE TRAVELER',e));return;}
-    cd=window.CrazyDream.create(ctx,{mix:1});rSend.connect(cd.input);cd.output.connect(rWet);}
-  function cdOff(){cdWant=false;if(!cd)return;const c=cd;cd=null;try{rSend.disconnect(c.input);}catch(e){}try{c.output.disconnect();}catch(e){}c.dispose();}
+  const rIn=G(1),rDry=G(1),rSend=G(1),rWet=G(.22),rOut=G(1),rSum=G(1),rLev=ctx.createAnalyser();rLev.fftSize=1024;const rlb=new Float32Array(1024);
+  rIn.connect(rDry);rDry.connect(rOut);rIn.connect(rSend);rSum.connect(rWet);rSum.connect(rLev);rWet.connect(rOut);
+  let cd=null,cdWant=false,cdIdle=0,cdFed=false;const VERB={inp:rIn,out:rOut};
+  function cdOn(){cdWant=true;clearTimeout(cdIdle);if(cd){if(!cdFed){rSend.connect(cd.input);cdFed=true;}return;}if(!window.CrazyDream){crazyDream().then(()=>{if(cdWant&&!cd)E.apply();}).catch(e=>console.warn('DRIFTWOOD SPACE TRAVELER',e));return;}
+    cd=window.CrazyDream.create(ctx,{mix:1});rSend.connect(cd.input);cdFed=true;cd.output.connect(rSum);}
+  function cdOff(){cdWant=false;clearTimeout(cdIdle);if(!cd)return;const c=cd;cd=null;if(cdFed)try{rSend.disconnect(c.input);}catch(e){}cdFed=false;try{c.output.disconnect();}catch(e){}c.dispose();}
+  /* (to SHUTTLE: Crazy Dream stops taking sound at once and is let go once its tail has rung out) */
+  function cdRest(){if(!cd||!cdWant)return;cdWant=false;if(cdFed){try{rSend.disconnect(cd.input);}catch(e){}cdFed=false;}clearTimeout(cdIdle);cdIdle=setTimeout(()=>{if(!cdWant)cdOff();},12000);}
+  /* SHUTTLE's plate: HORIZON's (its send cut at 600 Hz and 10 kHz, a pre-delay, a convolver of its ring); a new TIME makes a new ring in a
+     new convolver and the sound moves across to it, so the old ring dies away untouched; let go 6 s after SHUTTLE is left */
+  const plIn=G(0),plHp=B('highpass',600,.6),plLp=B('lowpass',10000,.6),plPre=ctx.createDelay(.3);rSend.connect(plIn);plIn.connect(plHp);plHp.connect(plLp);plLp.connect(plPre);
+  let plNow=null,plT=0,plTm=0,plIdle=0;
+  function plSwap(T){const t=ctx.currentTime,g=G(0),cv=ctx.createConvolver();cv.normalize=false;cv.buffer=plateIR(ctx,T);plPre.connect(g);g.connect(cv);cv.connect(rSum);
+    g.gain.setTargetAtTime(1,t,.03);const old=plNow;plNow={g,cv};if(old){hold(old.g.gain,t);old.g.gain.setTargetAtTime(0,t,.03);setTimeout(()=>{for(const n of [old.g,old.cv])try{n.disconnect();}catch(e){}},Math.min(6000,T*1300+400));}}
+  function plOff(){clearTimeout(plTm);plT=0;if(!plNow)return;const o=plNow;plNow=null;for(const n of [o.g,o.cv])try{n.disconnect();}catch(e){}}
   /* the amp's effects loop: where the amp's sound and the PAD meet, before DELAY and REVERB */
   const loopIn=G(1),padBus=G(1);padBus.connect(loopIn);const LOOP={inp:loopIn,out:loopIn};E.padBus=padBus;
   /* the end: a limiter, a meter, and the output (hooked up only while awake) */
@@ -340,8 +357,11 @@ function Engine(ctx,outG){
     const dVa=dmd==='VALLEY',dPk=dmd==='PEAK';ramp(dLL.gain,dVa?1:dPk?.72:0);ramp(dRR.gain,dVa?1:dPk?.72:0);ramp(dLR.gain,dPk?.72:0);ramp(dRL.gain,dPk?.72:0);ramp(dSky.gain,dmd==='SKY'?1.2:0);
     if(dmd==='SKY'&&dl.on)skyOn(dt);else skyOff();
     const v=P.verb,VM=VMODES[v.mode]||VMODES.HANGAR;vmNow=VMODES[v.mode]?v.mode:'HANGAR';E.wetT=v.mix*1.4*VM.trim;ramp(rWet.gain,E.wetT);ramp(rDry.gain,v.par?1:1-v.mix*.5);
-    if(v.on){cdOn();if(cd)cd.set({mix:1,size:VM.size,decay:VM.t(v.time==null?.55:v.time),predelay:(v.pre==null?.16:v.pre)*.25,mod:VM.mod,rate:VM.rate,lowCut:VM.lowCut,highCut:VM.highCut,gravity:0,resonance:0});}
-    else cdOff();
+    const vT=VM.t(v.time==null?.55:v.time),vPre=(v.pre==null?.16:v.pre)*.25;
+    if(v.on&&VM.plate){cdRest();ramp(plIn.gain,1,.02);ramp(plPre.delayTime,vPre,.05);clearTimeout(plIdle);const pT=+vT.toFixed(2);
+      if(pT!==plT){plT=pT;clearTimeout(plTm);if(plNow)plTm=setTimeout(()=>plSwap(pT),140);else plSwap(pT);}}   /* (a TIME turning: one new ring when it rests) */
+    else{ramp(plIn.gain,0,.02);if(plNow){clearTimeout(plIdle);plIdle=setTimeout(()=>{const w=E.P&&E.P.verb;if(!(w&&w.on&&(VMODES[w.mode]||{}).plate))plOff();},6000);}
+      if(v.on){cdOn();if(cd)cd.set({mix:1,size:VM.size,decay:vT,predelay:vPre,mod:VM.mod,rate:VM.rate,lowCut:VM.lowCut,highCut:VM.highCut,gravity:0,resonance:0});}else cdOff();}
     /* OCEAN SWELL: TIDE's wave (a slow swell and ebb between MIX and full, in beats of the desk's tempo), the wheel, WAVE's rest */
     const s=P.swell,isT=s.on&&s.mode==='tide';
     if(isT&&!tide){tide=ctx.createOscillator();tide.setPeriodicWave(ctx.createPeriodicWave(new Float32Array([0,0,0]),new Float32Array([0,1,.18])));tide.connect(tideAmp);tide.start();}
@@ -405,7 +425,7 @@ function Engine(ctx,outG){
     tick();fz={list,iv:setInterval(tick,60)};return list.length;};
   E.unfreeze=quick=>{if(!fz)return;clearInterval(fz.iv);fz=null;const t=ctx.currentTime;hold(fzG.gain,t);fzG.gain.setTargetAtTime(0,t,quick?.02:.3);};
   E.frozen=()=>fz?fz.list.length:0;
-  E.panic=()=>{E.unfreeze(true);E.allOff();cdOff();   /* (SPACE TRAVELER's tail let go with it: made again, empty, when the sound comes back on) */const t=ctx.currentTime;for(const g of [dFb,rWet,dWet]){hold(g.gain,t);g.gain.setTargetAtTime(0,t,.02);}clearTimeout(E._pT);E._pT=setTimeout(()=>E.apply(),1500);};
+  E.panic=()=>{E.unfreeze(true);E.allOff();cdOff();plOff();   /* (SPACE TRAVELER's tail let go with it: made again, empty, when the sound comes back on) */const t=ctx.currentTime;for(const g of [dFb,rWet,dWet]){hold(g.gain,t);g.gain.setTargetAtTime(0,t,.02);}clearTimeout(E._pT);E._pT=setTimeout(()=>E.apply(),1500);};
   E.wake=()=>{if(E.awake)return;E.awake=true;lim.connect(outG);lim.connect(meter);};
   E.sleep=()=>{if(!E.awake)return;E.awake=false;try{lim.disconnect();}catch(e){}};
   E.level=()=>{if(!E.awake)return 0;meter.getFloatTimeDomainData(mbuf);let s=0;for(const v of mbuf)s+=v*v;return Math.sqrt(s/mbuf.length);};
@@ -413,10 +433,10 @@ function Engine(ctx,outG){
   const gMet=ctx.createAnalyser();gMet.fftSize=1024;const gbuf=new Float32Array(1024);whG.connect(gMet);
   E.gLevel=()=>{if(!E.awake)return 0;gMet.getFloatTimeDomainData(gbuf);let s=0;for(const v of gbuf)s+=v*v;return Math.sqrt(s/gbuf.length);};
   E.inLevel=()=>{inMon.getFloatTimeDomainData(ibuf);let p=0;for(const v of ibuf){const a=Math.abs(v);if(a>p)p=a;}return p;};
-  E.sndIn=sndIn;E.lfoOn=()=>!!lfo;E.shimOn=()=>false;E.cdOn=()=>!!cd;E.cdLevel=()=>cd?cd.level():0;E.cdSet=()=>cd&&cd.settings;E.chain=()=>chainKey;
-  E.dispose=()=>{E.unfreeze(true);E.allOff();skyOff();if(lfo)try{lfo.stop();}catch(e){}cdOff();
+  E.sndIn=sndIn;E.lfoOn=()=>!!lfo;E.shimOn=()=>false;E.cdOn=()=>!!cd;E.plOn=()=>!!plNow;E.cdLevel=()=>{if(!cd&&!plNow)return 0;rLev.getFloatTimeDomainData(rlb);let s=0;for(const x of rlb)s+=x*x;return Math.sqrt(s/rlb.length);};E.cdSet=()=>cd&&cd.settings;E.chain=()=>chainKey;
+  E.dispose=()=>{E.unfreeze(true);E.allOff();skyOff();if(lfo)try{lfo.stop();}catch(e){}cdOff();plOff();clearTimeout(plIdle);
     if(tide)try{tide.stop();}catch(e){}
-    setTimeout(()=>{for(const n of [hTone,hLvl,fzG,swG,whG,tideAmp,loopIn,padBus,vBus,pkLo,pkHi,tone,gVol,chainIn,sndIn,cIn,cp,cTone,cWet,cDry,cpG,drHp,drMid,drPre,drSh,drWarm,drLp,drOut,mIn,mDry,mDl,mFb,mDlG,mWet,mSum,mTr,mTrG,mDep,mTrD,mPhD,mPhFb,mPhG,...mPh,aHp,aPre,aSh,aMk,aBass,aMid,aTreb,aC1,aC2,cab1,cab2,cab3,cab4,cabOut,aMaster,dIn,dDry,dL,dR,dFb,dTone,dMg,dWet,dOut,dLL,dLR,dRL,dRR,dSky,rIn,rDry,rSend,rWet,rOut,preLim,lim])try{n.disconnect();}catch(e){}},300);};
+    setTimeout(()=>{for(const n of [hTone,hLvl,fzG,swG,whG,tideAmp,loopIn,padBus,vBus,pkLo,pkHi,tone,gVol,chainIn,sndIn,cIn,cp,cTone,cWet,cDry,cpG,drHp,drMid,drPre,drSh,drWarm,drLp,drOut,mIn,mDry,mDl,mFb,mDlG,mWet,mSum,mTr,mTrG,mDep,mTrD,mPhD,mPhFb,mPhG,...mPh,aHp,aPre,aSh,aMk,aBass,aMid,aTreb,aC1,aC2,cab1,cab2,cab3,cab4,cabOut,aMaster,dIn,dDry,dL,dR,dFb,dTone,dMg,dWet,dOut,dLL,dLR,dRL,dRR,dSky,rIn,rDry,rSend,rWet,rOut,rSum,rLev,plIn,plHp,plLp,plPre,preLim,lim])try{n.disconnect();}catch(e){}},300);};
   return E;}
 
 /* ---- the face (a plain prototype: GUITAR and AMP on top, the PEDALBOARD below) ---- */
@@ -522,7 +542,9 @@ function style(){if(styled)return;styled=true;const s=document.createElement('st
 .dw .stw{border-radius:7px;cursor:ns-resize;overflow:hidden}.dw .stw::after{content:'';position:absolute;left:10%;right:10%;height:7px;border-radius:4px;pointer-events:none;
   top:calc(6% + (1 - var(--v,.5))*82%);background:linear-gradient(90deg,rgba(190,30,20,.15),rgba(215,40,28,.95) 30% 70%,rgba(190,30,20,.15));box-shadow:0 0 4px rgba(0,0,0,.4)}
 .dw .stscr,.dw .stled{pointer-events:none}.dw .stled{border-radius:50%;filter:brightness(.3) saturate(.3);-webkit-mask:radial-gradient(circle,#000 58%,transparent 100%)}
-.dw .ped.st.on .stled.out,.dw .ped.st.par .stled.in{filter:brightness(1.1)}
+.dw .stled.out{filter:none}.dw .ped.st.par .stled.in{filter:brightness(1.1)}   /* (the red one was photographed off: lit while on, drawn) */
+.dw .stled.out::after{content:'';position:absolute;inset:10%;border-radius:50%;opacity:0;transition:opacity .12s;background:radial-gradient(circle at 45% 40%,#FFF2EC 0 14%,#FF5A40 38%,#E0160A 62%,rgba(200,10,0,0) 100%)}.dw .ped.st.on .stled.out::after{opacity:1}
+.dw .stglow{position:absolute;border-radius:50%;pointer-events:none;opacity:0;mix-blend-mode:screen;background:radial-gradient(closest-side,rgba(255,70,50,.75),rgba(255,40,20,.25) 50%,rgba(255,30,10,0));transition:opacity .12s}.dw .ped.st.on .stglow{opacity:1}
 .dw .stpar{border-radius:50%;cursor:pointer;transition:transform .07s}.dw .stpar.down{transform:scale(.92);filter:brightness(.8)}
 .dw .stfs{border-radius:50%;cursor:pointer}.dw .stfs.down{background:rgba(0,0,0,.25)}
 .dw .ped.delay.rk{flex:0 0 63px;padding:0;background:#3B3C3E;border-radius:6px;overflow:hidden;box-shadow:0 2px 4px #000}
@@ -852,7 +874,7 @@ function stFace(){const u=M2.fileUrl(ST.src),[cx,cy,cw,ch]=ST.cut,bg=(x,y)=>`bac
     ST.keys.map(([m,x,y,w,h])=>`<div class="stk" data-b="vm.${m}" title="${m}: ${VMTIP[m].toLowerCase()}" style="${at(x-w/2,y-h/2,w,h)};${bg(x-w/2,y-h/2)}"><canvas class="stg" width="${w}" height="${h}"></canvas></div>`).join('')+
     `<canvas class="stscr" width="${sw*2}" height="${sh*2}" style="${at(sx,sy,sw,sh)}"></canvas>`+
     ST.wheels.map(([k,x,y,w,h])=>`<div class="stw" data-k="${k}" title="${KN[k][0].toLowerCase()}: drag up and down, or scroll" style="${at(x-w/2,y-h/2,w,h)}"></div>`).join('')+
-    dot(ST.ledOut,'stled out')+dot(ST.ledIn,'stled in')+
+    dot(ST.ledOut,'stled out')+`<i class="stglow" style="${at(ST.ledOut[0]-ST.ledOut[2]*3,ST.ledOut[1]-ST.ledOut[2]*3,ST.ledOut[2]*6,ST.ledOut[2]*6)}"></i>`+dot(ST.ledIn,'stled in')+
     `<div class="stpar" data-b="verb.par" title="PARALLEL: a send; your guitar at full, MIX sends it to the reverb" style="${at(ST.par[0]-ST.par[2],ST.par[1]-ST.par[2],2*ST.par[2],2*ST.par[2])};${bg(ST.par[0]-ST.par[2],ST.par[1]-ST.par[2])}"></div>`+
     `<div class="stfs" data-s="verb" title="SPACE TRAVELER on / off" style="${at(ST.fs[0]-ST.fs[2],ST.fs[1]-ST.fs[2],2*ST.fs[2],2*ST.fs[2])}"></div></div>`;}
 const PEDALS=[['swell','OCEAN SWELL','notes rise like a swell on the sea: each note, a wave, the tide, or the hall rising'],['comp','AIR COMPRESSOR','evens and lengthens: squeeze, attack, tone, blend'],['drive','SUNSET DRIVE','a warm overdrive: drive, tone, warmth, level'],['harm','BARBERSHOP','a harmonizer: voices in the key, octaves, a doubled guitar, crystals; held, it freezes'],['mod','LIGHTHOUSE','chorus · flanger · phaser · vibrato · tremolo: rate, depth, mix'],['pad','CUSHION','a soft pad under the guitar: any two of six sounds; it holds what you play until the next chord'],
@@ -1451,7 +1473,7 @@ const DEF={id:'driftwood',name:'DRIFTWOOD electric guitar',short:'DRIFTWOOD',typ
           pole:{ph:+bPh.toFixed(2),running:!!bRaf},singers:sLv.map(x=>+x.toFixed(2)),blink:bsLed.classList.contains('blink'),screen:bsEdit>performance.now()?bsMsg.join(' · '):S.v.harm.on?'on':'closed',
           harm:E.voices.filter(v=>v.harm).map(v=>v.n+(v.oneShot?'r':'')+'@'+v.slot)}}),
       bsVoices:n=>bsVoices(n).map(x=>x.n),debugHold:w=>w==='fs'?bsFreeze():w==='rk.tap'?avalStart():learnStart(),debugUnhold:w=>{if(w==='rk.tap')avalEnd();},
-      debugSet:(k,v)=>set(k,v,true),debugSea:()=>{if(sea)sea.draw(...seaSize(),seaT+=.03,seaLv);},debugBeam:ph=>{lPh=ph;beamDraw();},padVoice:n=>padHeld.get(n),gLevel:()=>E.gLevel(),padFollow:()=>+folG.toFixed(3),space:()=>({face:{keys:[...m.querySelectorAll('.stk.on')].map(e=>e.dataset.b),par:!!m.querySelector('.stpar.on'),wheel:m.querySelector('.stw[data-k="verb.mix"]').style.getPropertyValue('--v')},on:E.cdOn(),set:E.cdSet(),wet:+E.wetT.toFixed(3)}),rk:()=>({mode:S.v.delay.mode,div:S.v.delay.div,tap:S.v.delay.tap,dt:+(E.dt||0).toFixed(4),echo:+E.echoTime().toFixed(4),sky:E.sky(),aval:E.aval()}),rkTap:t=>rkTap(t),zoomPed:id=>zoomPed(id),unzoom:()=>unzoom(),zOpen:()=>zOpen,cuSwing:()=>({amp:+cuAmp.toFixed(3),shown:cuShown,ready:!!cuPlate}),padLv:()=>padE&&padE.P.lv,padP:()=>padE&&padE.P,debugHush:()=>{clearTimeout(pendT);pend=null;padLetGo();E.allOff();if(padE)padE.voices.slice().forEach(v=>v.kill(ctx.currentTime));padHeld.clear();},debugButton:b=>button(b),debugStomp:s=>stomp(s),debugCycle:(c,d)=>cycle(c,d||1),harmOf,
+      debugSet:(k,v)=>set(k,v,true),debugSea:()=>{if(sea)sea.draw(...seaSize(),seaT+=.03,seaLv);},debugBeam:ph=>{lPh=ph;beamDraw();},padVoice:n=>padHeld.get(n),gLevel:()=>E.gLevel(),padFollow:()=>+folG.toFixed(3),space:()=>({face:{keys:[...m.querySelectorAll('.stk.on')].map(e=>e.dataset.b),par:!!m.querySelector('.stpar.on'),wheel:m.querySelector('.stw[data-k="verb.mix"]').style.getPropertyValue('--v')},on:E.cdOn(),plate:E.plOn(),set:E.cdSet(),wet:+E.wetT.toFixed(3)}),rk:()=>({mode:S.v.delay.mode,div:S.v.delay.div,tap:S.v.delay.tap,dt:+(E.dt||0).toFixed(4),echo:+E.echoTime().toFixed(4),sky:E.sky(),aval:E.aval()}),rkTap:t=>rkTap(t),zoomPed:id=>zoomPed(id),unzoom:()=>unzoom(),zOpen:()=>zOpen,cuSwing:()=>({amp:+cuAmp.toFixed(3),shown:cuShown,ready:!!cuPlate}),padLv:()=>padE&&padE.P.lv,padP:()=>padE&&padE.P,debugHush:()=>{clearTimeout(pendT);pend=null;padLetGo();E.allOff();if(padE)padE.voices.slice().forEach(v=>v.kill(ctx.currentTime));padHeld.clear();},debugButton:b=>button(b),debugStomp:s=>stomp(s),debugCycle:(c,d)=>cycle(c,d||1),harmOf,
       destroy(){dead=true;clearTimeout(stHotT);removeEventListener('keydown',zKey);clearInterval(folT);clearTimeout(rkBlinkT);if(E.aval())E.avalanche(false);removeEventListener('pointerup',bspUp);removeEventListener('keydown',bspKey);if(seaRaf)cancelAnimationFrame(seaRaf);if(bRaf)cancelAnimationFrame(bRaf);clearTimeout(bsT);if(learn)clearTimeout(learn.t);if(gRaf)cancelAnimationFrame(gRaf);if(tRaf)cancelAnimationFrame(tRaf);if(sea)sea.dispose();clearTimeout(flashT);clearTimeout(sleepT);clearTimeout(pendT);clearTimeout(kinT);if(comp)compKeys(false);if(offMidi)offMidi();offStat();offIn();offTempo();
         if(padE)padE.dispose();E.dispose();host.engine.busy(uid,false);setTimeout(()=>{try{outG.disconnect();}catch(e){}},350);}};}};
 M2.define(DEF);
