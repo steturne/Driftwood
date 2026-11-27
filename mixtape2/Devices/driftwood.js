@@ -1428,7 +1428,7 @@ const DEF={id:'driftwood',name:'DRIFTWOOD electric guitar',short:'DRIFTWOOD',typ
       if(b.startsWith('amp.')){v.amp.model=b.slice(4);S.edited=true;apply();paint();host.changed('switch');return flash('AMP',AMPS[v.amp.model].name);}}
 
     /* ---- the computer keyboard (KEYS lit), as HORIZON's ---- */
-    const CK={KeyA:0,KeyW:1,KeyS:2,KeyE:3,KeyD:4,KeyF:5,KeyT:6,KeyG:7,KeyY:8,KeyH:9,KeyU:10,KeyJ:11,KeyK:12,KeyO:13,KeyL:14,KeyP:15,Semicolon:16,Quote:17},CK_BASE=52;
+    const CK={KeyA:0,KeyW:1,KeyS:2,KeyE:3,KeyD:4,KeyF:5,KeyT:6,KeyG:7,KeyY:8,KeyH:9,KeyU:10,KeyJ:11,KeyK:12,KeyO:13,KeyL:14,KeyP:15,Semicolon:16,Quote:17},CK_BASE=60;   /* (A = middle C, Ableton's C3, as on every Mixtape 2 instrument: it was the guitar's low E, so the white letters played E major and BARBERSHOP, set to C, harmonized E major's notes in C: Steve, 2026-11-27) */
     const busyTyping=t=>!!(t&&(t.isContentEditable||/^(TEXTAREA|SELECT)$/.test(t.tagName)||t.tagName==='INPUT'&&!/^(range|checkbox|radio|button|submit|color)$/.test(t.type)))||!!document.querySelector('.modal');
     function kd(e){if(!comp||dead||e.ctrlKey||e.altKey||e.metaKey||busyTyping(e.target))return;const c=e.code;
       if(c in CK){e.preventDefault();if(e.repeat||typed.has(c))return;typed.add(c);key({t:'on',n:CK_BASE+12*koct+CK[c],v:kvel});return;}
